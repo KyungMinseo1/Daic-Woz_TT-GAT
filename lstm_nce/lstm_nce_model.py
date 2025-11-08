@@ -10,7 +10,11 @@ class SimpleBiLSTM(nn.Module):
     self.dropout = nn.Dropout(dropout)
     self.fc = nn.Linear(hidden_dim*2, output_dim)
   def forward(self, x, lengths):
-    # x: (batch, seq_len)
+    """
+    Args:
+      x: (batch, seq_len, input_dim) - already feature vectors
+      lengths: (batch,) - sequence lengths
+    """
     packed = pack_padded_sequence(x, lengths.cpu(), batch_first=True, enforce_sorted=False)
     packed_out, (h_n, c_n) = self.bilstm(packed)
 
@@ -52,18 +56,18 @@ class NCEModel(nn.Module):
     """
     batch_size = q.size(0)
 
-    q = F.normalize(self.encoder_q(q, q_len), dim=1)  # (B, D)
+    q_feat = F.normalize(self.encoder_q(q, q_len), dim=1)  # (B, D)
 
     with torch.no_grad():
-      k = F.normalize(self.encoder_k(q, q_len), dim=1)  # (B, D)
+      k_feat = F.normalize(self.encoder_k(q, q_len), dim=1)  # (B, D)
 
     # extract queue features from k_model (queue_size, D)
     queue_features = queue.clone().detach().T  # (K, D)
-    all_keys = torch.cat([k, queue_features], dim=0)  # (B+K, D)
+    all_keys = torch.cat([k_feat, queue_features], dim=0)  # (B+K, D)
     all_labels = torch.cat([q_label, queue_labels], dim=0)  # (B+K,)
 
     # Query & Queue similarity: (B, Q)
-    logits = torch.matmul(q, all_keys.T) / self.T
+    logits = torch.matmul(q_feat, all_keys.T) / self.T
 
     # mask[i,j] = 1 if q_label[i] == queue_labels[j]
     q_labels_expanded = q_label.unsqueeze(1)  # (B, 1)
