@@ -13,6 +13,11 @@ from lstm_nce_model import NCEModel
 from prepare_dataset_vision_nce import read_v
 import pandas as pd
 import os, config_path, json
+
+# OpenMP / MKL 충돌 방지용 설정
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+
 from nce_dataset import LSTM_NCE_DATASET
 import matplotlib.pyplot as plt
 import yaml

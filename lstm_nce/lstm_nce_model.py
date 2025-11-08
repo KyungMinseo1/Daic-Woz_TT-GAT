@@ -42,21 +42,38 @@ class NCEModel(nn.Module):
       param_k.requires_grad = False  # target encoder는 gradient X
 
   def forward(self, q, q_len, q_label, queue, queue_labels):
-    # compute query features
-    # (B, D)
-    q = F.normalize(self.encoder_q(q, q_len), dim=1)
+    """
+    Args:
+      q: (B, seq_len, input_dim) - query sequences
+      q_len: (B,) - query lengths
+      q_label: (B,) - query labels
+      queue: (D, K) - queue features
+      queue_labels: (K,) - queue labels
+    """
+    batch_size = q.size(0)
+
+    q = F.normalize(self.encoder_q(q, q_len), dim=1)  # (B, D)
+
+    with torch.no_grad():
+      k = F.normalize(self.encoder_k(q, q_len), dim=1)  # (B, D)
 
     # extract queue features from k_model (queue_size, D)
-    queue_features = queue.clone().detach().T
-    queue_labels = queue_labels.clone().detach() # type: ignore
+    queue_features = queue.clone().detach().T  # (K, D)
+    all_keys = torch.cat([k, queue_features], dim=0)  # (B+K, D)
+    all_labels = torch.cat([q_label, queue_labels], dim=0)  # (B+K,)
 
     # Query & Queue similarity: (B, Q)
-    logits = torch.matmul(q, queue_features.T) / self.T
+    logits = torch.matmul(q, all_keys.T) / self.T
 
     # mask[i,j] = 1 if q_label[i] == queue_labels[j]
     q_labels_expanded = q_label.unsqueeze(1)  # (B, 1)
-    queue_labels_expanded = queue_labels.unsqueeze(0)  # (1, Q)
-    mask = (q_labels_expanded == queue_labels_expanded).float()  # (B, Q)
+    all_labels_expanded = all_labels.unsqueeze(0)  # (1, B+K)
+    mask = (q_labels_expanded == all_labels_expanded).float()  # (B, B+K)
+
+    # mask out self-contrast (diagonal of first B columns)
+    self_mask = torch.eye(batch_size, dtype=torch.float, device=q.device)
+    self_mask = F.pad(self_mask, (0, all_keys.size(0) - batch_size), value=0)  # (B, B+K)
+    mask = mask * (1 - self_mask)
 
     # for numerical stability
     logits_max, _ = torch.max(logits, dim=1, keepdim=True)
