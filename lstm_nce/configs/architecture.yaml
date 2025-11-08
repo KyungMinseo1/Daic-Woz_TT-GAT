@@ -1,0 +1,16 @@
+training:
+  lr: 0.001
+  weight-decay: 0.0000001
+  bs: 32
+  scheduler: 'steplr'
+  gamma: 0.1
+  step-size: 15
+  workers: 2
+  q_size: 4096
+
+model:
+  h_dim: 256
+  o_dim: 256
+  depth: 4
+  dropout: 0.15
+  T: 0.1

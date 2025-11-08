@@ -12,10 +12,11 @@ from functools import partial
 from lstm_nce_model import NCEModel
 from prepare_dataset_vision_nce import read_v
 import pandas as pd
-import os, config, json
+import os, config_path, json
 from nce_dataset import LSTM_NCE_DATASET
-import numpy as np
 import matplotlib.pyplot as plt
+import yaml
+import argparse
 
 def collate_batch(batch):
   # batch: list of (tensor(tokens), tensor(label))
@@ -71,7 +72,7 @@ class Queue(nn.Module):
 
     self.queue_ptr[0] = end # type: ignore
 
-def train(model, dataloader, queue, optimizer, device, is_first_batch):
+def train(model, dataloader, queue, optimizer, device, warmup=False):
   model.encoder_q.train()
   model.encoder_k.eval()
 
@@ -82,13 +83,11 @@ def train(model, dataloader, queue, optimizer, device, is_first_batch):
   for batch_idx, (x, x_len, y) in enumerate(pbar):
     x, x_len, y = x.to(device), x_len.to(device), y.to(device)
 
-    # queue initialization with first batch
-    if is_first_batch:
+    if warmup:
       with torch.no_grad():
-        print("First Queue Initialization Start")
-        init_k = F.normalize(model.encoder_k(x, x_len), dim=1)
-        queue.initialize_queue(init_k, y)
-      is_first_batch = False
+        new_k = F.normalize(model.encoder_k(x, x_len), dim=1)
+        queue.dequeue_and_enqueue(new_k, y)
+      continue
 
     loss = model(x, x_len, y, queue.queue, queue.queue_labels)
     optimizer.zero_grad()
@@ -116,7 +115,7 @@ def train(model, dataloader, queue, optimizer, device, is_first_batch):
       'batch': f'{batch_idx+1}/{num_batches}'
     })
 
-  return avg_loss
+  return avg_loss if not warmup else 0.0
 
 def validation_knn(model, train_loader, val_loader, device, k=5, batch_size=256):
   model.encoder_k.eval()
@@ -170,12 +169,32 @@ def validation_knn(model, train_loader, val_loader, device, k=5, batch_size=256)
   return accuracy
   
 def main():
-  checkpoints_dir = os.path.join(config.ROOT_DIR, 'checkpoints')
-  os.makedirs(checkpoints_dir, exist_ok=True)
-  checkpoint_name = str(input("Checkpoints Directory -> "))
-  if checkpoint_name == "":
-    print("Please fill in the target directory name")
-  CHECKPOINTS_DIR = os.path.join(checkpoints_dir, checkpoint_name)
+  parser = argparse.ArgumentParser()
+  parser.add_argument('--num_epochs', default=100, type=int,
+                      help='Number of training epochs.')
+  parser.add_argument('--workers', default=2, type=int,
+                      help='Number of data loader workers.')
+  parser.add_argument('--resume', default='', type=str, metavar='PATH',
+                      help='Path to latest checkpoint (default: none).')
+  parser.add_argument('--config', type=str, default='lstm_nce/configs/architecture.yaml',
+                      help="Which configuration to use. See into 'config' folder.")
+  parser.add_argument('--save_dir', type=str, default='checkpoints', metavar='PATH',
+                      help="Directory path to save model")
+  parser.add_argument('--save_dir_', type=str, default='checkpoints1', metavar='PATH',
+                      help="Exact directory path to save model")
+  parser.add_argument('--patience', type=int, default=10, 
+                      help="How many epochs wait before stopping for validation loss not improving.")
+  parser.add_argument('--warmup_epochs', type=int, default=3,
+                      help='Number of warm-up epochs to fill the queue before full training.')
+  
+  opt = parser.parse_args()
+  print(opt)
+
+  with open(opt.config, 'r', encoding="utf-8") as ymlfile:
+    config = yaml.safe_load(ymlfile)
+
+  os.makedirs(opt.save_dir, exist_ok=True)
+  CHECKPOINTS_DIR = os.path.join(opt.save_dir, opt.save_dir_)
   os.makedirs(CHECKPOINTS_DIR, exist_ok=True)
 
   history = {
@@ -190,8 +209,8 @@ def main():
   val_dataset = mgr.list()
   val_label_dataset = mgr.list()
   
-  train_df = pd.read_csv(os.path.join(config.DATA_DIR, 'train_split_Depression_AVEC2017.csv'))
-  val_df = pd.read_csv(os.path.join(config.DATA_DIR, 'dev_split_Depression_AVEC2017.csv'))
+  train_df = pd.read_csv(os.path.join(config_path.DATA_DIR, 'train_split_Depression_AVEC2017.csv'))
+  val_df = pd.read_csv(os.path.join(config_path.DATA_DIR, 'dev_split_Depression_AVEC2017.csv'))
   
   train_id = train_df.Participant_ID.tolist()
   val_id = val_df.Participant_ID.tolist()
@@ -218,37 +237,58 @@ def main():
   val_data = LSTM_NCE_DATASET(val_dataset, val_label_dataset)
   del val_dataset
 
-  train_loader = DataLoader(train_data, batch_size=16, num_workers=2, shuffle=True, pin_memory=True, collate_fn=collate_batch)
-  val_loader = DataLoader(val_data, batch_size=16, num_workers=2, shuffle=True, pin_memory=True, collate_fn=collate_batch)
+  train_loader = DataLoader(train_data, batch_size=config['training']['bs'], num_workers=config['training']['workers'], shuffle=True, pin_memory=True, collate_fn=collate_batch)
+  val_loader = DataLoader(val_data, batch_size=config['training']['bs'], num_workers=config['training']['workers'], shuffle=False, pin_memory=True, collate_fn=collate_batch)
   
   # train setting
-  EPOCH = 15
-  hidden_dim = 128
-  output_dim = 64
-  first_batch = True
+  hidden_dim = config['training']['h_dim']
+  output_dim = config['training']['o_dim']
 
-  model = NCEModel(input_dim, hidden_dim, output_dim)
-  queue = Queue(output_dim)
-  optimizer = torch.optim.Adam(model.encoder_q.parameters(), lr=1e-3)
-  scheduler = lr_scheduler.StepLR(optimizer, step_size=15, gamma=0.1)
+  model = NCEModel(input_dim, hidden_dim, output_dim, num_layers=config['training']['depth'], dropout=config['training']['dropout'], temperature=config['training']['T'])
+  queue = Queue(output_dim=output_dim, queue_size=config['training']['q_size'])
+  optimizer = torch.optim.Adam(model.encoder_q.parameters(), lr=config['training']['lr'])
+  scheduler = lr_scheduler.StepLR(optimizer, step_size=config['training']['step-size'], gamma=config['training']['gamma'])
   
   device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
   model.to(device)
   queue.to(device)
 
+  starting_epoch = 0
+  if opt.resume and os.path.exists(opt.resume):
+    print(f"Loading checkpoint from {opt.resume}")
+    checkpoint = torch.load(opt.resume)
+    
+    model.load_state_dict(checkpoint['model_state_dict'])
+    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+    queue.load_state_dict(checkpoint['queue_state_dict'])
+    starting_epoch = checkpoint['epoch'] + 1
+    history = checkpoint['history']
+    
+    print(f"Resuming from epoch {starting_epoch}")
+    print(f"Previous best val_loss: {min(history['val_loss']) if history['val_loss'] else 'N/A'}")
+  else:
+    print("No checkpoint loaded. Starting from scratch.")
+
   print("Train Start")
 
-  for epoch in range(EPOCH):
-    train_avg_loss = train(model, train_loader, queue, optimizer, device, first_batch)
-    first_batch=False
+  patience = 0
+
+  for epoch in range(starting_epoch, opt.num_epochs + 1):
+    warmup = epoch <= opt.warmup_epochs
+    if warmup:
+      print(f"\n[Warm-up Epoch {epoch}/{opt.warmup_epochs}] Filling queue only...")
+    train_avg_loss = train(model, train_loader, queue, optimizer, device, warmup)
+    if warmup:
+      continue
     val_accuracy = validation_knn(model, train_loader, val_loader, device)
 
-    history['epoch'].append(epoch+1)
+    history['epoch'].append(epoch)
     history['train_loss'].append(train_avg_loss)
     history['val_accuracy'].append(val_accuracy)
 
-    print("#" + str(epoch) + "/" + str(EPOCH) + " loss:" +
+    print("#" + str(epoch) + "/" + str(opt.num_epochs) + " loss:" +
                 str(train_avg_loss) + " accuracy:" + str(val_accuracy))
     
     checkpoint = {
@@ -256,12 +296,27 @@ def main():
         'model_state_dict': model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
         'scheduler_state_dict': scheduler.state_dict(),
+        'queue_state_dict' : queue.state_dict(),
+        'configs' : config,
         'history': history
     }
 
     checkpoint_path = os.path.join(CHECKPOINTS_DIR, f"checkpoint_epoch{epoch}.pth")
     torch.save(checkpoint, checkpoint_path)
     print(f"Checkpoint saved: {checkpoint_path}")
+
+    if len(history['val_accuracy']) > 0 and val_accuracy == max(history['val_accuracy']):
+      best_path = os.path.join(CHECKPOINTS_DIR, f"best_model.pth")
+      torch.save(checkpoint, best_path)
+      print(f"Best model saved: {best_path}")
+      patience = 0
+    else:
+      patience += 1
+      print(f"Current Patience: {patience}")
+    
+    if patience >= opt.patience:
+      print(f"# {epoch}/{opt.num_epochs} => Early Stopping")
+      break
 
   # 학습 완료 후 그래프 생성
   print("\nGenerating training history plots...")
@@ -271,11 +326,11 @@ def main():
   if not os.path.exists(plots_dir):
       os.makedirs(plots_dir)
 
-  epochs_range = range(len(history['train_loss']))
+  epochs_range = range(starting_epoch, starting_epoch + len(history['train_loss']))
 
   # Loss 그래프
   plt.figure(figsize=(12, 5))
-  plt.subplot(1, 1, 1)
+  plt.subplot(1, 2, 1)
   plt.plot(epochs_range, history['train_loss'], 'b-', label='Train Loss')
   plt.xlabel('Epoch')
   plt.ylabel('Loss')
@@ -284,7 +339,7 @@ def main():
   plt.grid(True)
 
   # Accuracy 그래프
-  plt.subplot(1, 1, 2)
+  plt.subplot(1, 2, 2)
   plt.plot(epochs_range, history['val_accuracy'], 'r-', label='Val Accuracy')
   plt.xlabel('Epoch')
   plt.ylabel('Accuracy')
@@ -308,3 +363,9 @@ def main():
 
 if __name__=="__main__":
   main()
+
+# first
+#   ex) python lstm_nce/train_nce.py
+#     -> epochs: 100, workers: 2, config_file: lstm_nce/configs/architecture.yaml, save_path: checkpoints/checkpoints1, patience: 10, warmup_for_queue: 3
+# resume
+#   ex) python lstm_nce/train_nce.py --resume checkpoints/checkpoints1/best_model.pth
