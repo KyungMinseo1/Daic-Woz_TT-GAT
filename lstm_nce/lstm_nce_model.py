@@ -1,0 +1,77 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.nn.utils.rnn import pack_padded_sequence
+
+class SimpleBiLSTM(nn.Module):
+  def __init__(self, input_dim:int, hidden_dim:int, output_dim:int, num_layers:int=2, dropout:float=0.3):
+    super().__init__()
+    self.bilstm = nn.LSTM(input_dim, hidden_dim, num_layers=num_layers, batch_first=True, bidirectional=True, dropout=dropout if num_layers>1 else 0.0)
+    self.dropout = nn.Dropout(dropout)
+    self.fc = nn.Linear(hidden_dim*2, output_dim)
+  def forward(self, x, lengths):
+    # x: (batch, seq_len)
+    packed = pack_padded_sequence(x, lengths.cpu(), batch_first=True, enforce_sorted=False)
+    packed_out, (h_n, c_n) = self.bilstm(packed)
+
+    if self.bilstm.bidirectional:
+      # take the last layer's forward and backward
+      # forward hidden is h_n[-2], backward hidden is h_n[-1]
+      h_forward = h_n[-2]
+      h_backward = h_n[-1]
+      h_final = torch.cat((h_forward, h_backward), dim=1) # (batch, hidden_dim*2)
+    else:
+      h_final = h_n[-1]
+
+    out = self.dropout(h_final)
+    logits = self.fc(out)
+    return logits
+
+class NCEModel(nn.Module):
+  def __init__(self, input_dim:int, hidden_dim:int, output_dim:int, num_layers:int=2, dropout:float=0.3, temperature=0.07):
+    super().__init__()
+    self.encoder_q = SimpleBiLSTM(input_dim, hidden_dim, output_dim, num_layers, dropout)
+    self.encoder_k = SimpleBiLSTM(input_dim, hidden_dim, output_dim, num_layers, dropout)
+
+    # EMA momentum coefficient
+    self.T = temperature
+
+    # initialize key encoder same as query encoder
+    for param_q, param_k in zip(self.encoder_q.parameters(), self.encoder_k.parameters()):
+      param_k.data.copy_(param_q.data)
+      param_k.requires_grad = False  # target encoder는 gradient X
+
+  def forward(self, q, q_len, q_label, queue, queue_labels):
+    # compute query features
+    # (B, D)
+    q = F.normalize(self.encoder_q(q, q_len), dim=1)
+
+    # extract queue features from k_model (queue_size, D)
+    queue_features = queue.clone().detach().T
+    queue_labels = queue_labels.clone().detach() # type: ignore
+
+    # Query & Queue similarity: (B, Q)
+    logits = torch.matmul(q, queue_features.T) / self.T
+
+    # mask[i,j] = 1 if q_label[i] == queue_labels[j]
+    q_labels_expanded = q_label.unsqueeze(1)  # (B, 1)
+    queue_labels_expanded = queue_labels.unsqueeze(0)  # (1, Q)
+    mask = (q_labels_expanded == queue_labels_expanded).float()  # (B, Q)
+
+    # for numerical stability
+    logits_max, _ = torch.max(logits, dim=1, keepdim=True)
+    logits = logits - logits_max.detach()
+
+    # calculate log probability
+    exp_logits = torch.exp(logits)
+    log_prob = logits - torch.log(exp_logits.sum(1, keepdim=True))
+
+    # mean of positive pairs log probability
+    mask_pos_pairs = mask.sum(1)  # 각 query의 positive pair 개수
+    mask_pos_pairs = torch.where(mask_pos_pairs < 1e-6, 1, mask_pos_pairs)
+    mean_log_prob_pos = (mask * log_prob).sum(1) / mask_pos_pairs
+
+    loss = -mean_log_prob_pos.mean()
+
+    return loss
+

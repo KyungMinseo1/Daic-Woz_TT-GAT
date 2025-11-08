@@ -1,0 +1,310 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import DataLoader
+from torch.optim import lr_scheduler
+from torch.nn.utils.rnn import pad_sequence
+from tqdm import tqdm
+from multiprocessing import Manager
+from multiprocessing.pool import Pool
+from tqdm import tqdm
+from functools import partial
+from lstm_nce_model import NCEModel
+from prepare_dataset_vision_nce import read_v
+import pandas as pd
+import os, config, json
+from nce_dataset import LSTM_NCE_DATASET
+import numpy as np
+import matplotlib.pyplot as plt
+
+def collate_batch(batch):
+  # batch: list of (tensor(tokens), tensor(label))
+  x = [item[0] for item in batch]
+  labels = torch.stack([item[1] for item in batch]).long()
+  lengths = torch.tensor([t.size(0) for t in x], dtype=torch.long)
+  x_padded = pad_sequence(x, batch_first=True, padding_value=0) # pad id = 0
+  return x_padded, lengths, labels
+
+@torch.no_grad()
+def update_momentum_encoder(encoder_k, encoder_q, m=0.999):
+  for param_q, param_k in zip(encoder_q.parameters(), encoder_k.parameters()):
+    param_k.data = param_k.data * m + param_q.data * (1. - m)
+
+class Queue(nn.Module):
+  def __init__(self, output_dim:int, queue_size=4096):
+    super().__init__()
+    self.register_buffer("queue", torch.randn(output_dim, queue_size))
+    self.queue = F.normalize(self.queue, dim=0)
+    self.register_buffer("queue_labels", torch.zeros(queue_size, dtype=torch.long))
+    self.register_buffer("queue_ptr", torch.zeros(1, dtype=torch.long))
+    self.register_buffer("is_initialized", torch.tensor(False))
+
+  @torch.no_grad()
+  def initialize_queue(self, keys, labels):
+    if not self.is_initialized: # type: ignore
+      batch_size = keys.shape[0]
+      # repeat with first batch
+      for i in range(0, self.queue.shape[1], batch_size):
+        end = min(i + batch_size, self.queue.shape[1])
+        self.queue[:, i:end] = keys[:end-i].T
+        self.queue_labels[i:end] = labels[:end-i] # type: ignore
+      self.is_initialized.fill_(True) # type: ignore
+  
+  @torch.no_grad()
+  def dequeue_and_enqueue(self, keys, labels): # labels 인자 추가
+    keys = keys.detach()
+    batch_size = keys.shape[0]
+    ptr = int(self.queue_ptr) # type: ignore
+    queue_size = self.queue.shape[1]
+
+    end = (ptr + batch_size) % queue_size
+    
+    if end > ptr:
+      self.queue[:, ptr:end] = keys[:end - ptr].T
+      self.queue_labels[ptr:end] = labels[:end - ptr] # type: ignore
+    else:
+      remaining = queue_size - ptr
+      self.queue[:, ptr:] = keys[:remaining].T
+      self.queue_labels[ptr:] = labels[:remaining] # type: ignore
+      self.queue[:, :end] = keys[remaining:].T
+      self.queue_labels[:end] = labels[remaining:] # type: ignore
+
+    self.queue_ptr[0] = end # type: ignore
+
+def train(model, dataloader, queue, optimizer, device, is_first_batch):
+  model.encoder_q.train()
+  model.encoder_k.eval()
+
+  total_loss = 0.0
+  num_batches = len(dataloader)
+  pbar = tqdm(dataloader, desc='Training', ncols=120)
+
+  for batch_idx, (x, x_len, y) in enumerate(pbar):
+    x, x_len, y = x.to(device), x_len.to(device), y.to(device)
+
+    # queue initialization with first batch
+    if is_first_batch:
+      with torch.no_grad():
+        print("First Queue Initialization Start")
+        init_k = F.normalize(model.encoder_k(x, x_len), dim=1)
+        queue.initialize_queue(init_k, y)
+      is_first_batch = False
+
+    loss = model(x, x_len, y, queue.queue, queue.queue_labels)
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+
+    # compute key features (momentum encoder)
+    with torch.no_grad():
+      update_momentum_encoder(model.encoder_k, model.encoder_q)
+      new_k = F.normalize(model.encoder_k(x, x_len), dim=1)
+
+    with torch.no_grad():
+      queue.dequeue_and_enqueue(new_k, y)
+
+    total_loss += loss.item()
+    avg_loss = total_loss / (batch_idx + 1)
+
+    current_lr = optimizer.param_groups[0]['lr']
+
+    # Update progress bar with detailed info
+    pbar.set_postfix({
+      'loss': f'{loss.item():.4f}',
+      'avg': f'{avg_loss:.4f}',
+      'lr': f'{current_lr:.2e}',
+      'batch': f'{batch_idx+1}/{num_batches}'
+    })
+
+  return avg_loss
+
+def validation_knn(model, train_loader, val_loader, device, k=5, batch_size=256):
+  model.encoder_k.eval()
+  
+  print("Building feature bank from training set...")
+  train_features = []
+  train_labels = []
+  with torch.no_grad():
+    for x, x_len, y in tqdm(train_loader, desc='Feature Bank', ncols=100):
+      x, x_len, y = x.to(device), x_len.to(device), y.to(device)
+      features = F.normalize(model.encoder_k(x, x_len), dim=1)
+      train_features.append(features.cpu())  # CPU로 이동하여 메모리 절약
+      train_labels.append(y.cpu())
+  
+  train_features = torch.cat(train_features, dim=0)
+  train_labels = torch.cat(train_labels, dim=0)
+
+  print(f"Running KNN validation (k={k})...")
+  correct = 0
+  total = 0
+
+  with torch.no_grad():
+    pbar = tqdm(val_loader, desc='KNN Validation', ncols=120)
+    for x, x_len, y in pbar:
+      x, x_len, y = x.to(device), x_len.to(device), y.to(device)
+      
+      features = F.normalize(model.encoder_k(x, x_len), dim=1)
+      
+      batch_predictions = []
+      for i in range(0, train_features.size(0), batch_size):
+        batch_train_features = train_features[i:i+batch_size].to(device)
+        batch_sim = torch.matmul(features, batch_train_features.T)
+        batch_predictions.append(batch_sim)
+      
+      similarities = torch.cat(batch_predictions, dim=1)
+      
+      # Top-k
+      _, topk_indices = similarities.topk(k, dim=1)
+      topk_labels = train_labels[topk_indices.cpu()]
+      predictions = torch.mode(topk_labels, dim=1)[0]
+      
+      correct += (predictions.to(device) == y).sum().item()
+      total += y.size(0)
+      
+      pbar.set_postfix({
+          'acc': f'{correct/total:.4f}',
+          'correct': f'{correct}/{total}'
+      })
+  accuracy = correct / total
+  print(f"\nKNN Validation Accuracy (k={k}): {accuracy:.4f}")
+  return accuracy
+  
+def main():
+  checkpoints_dir = os.path.join(config.ROOT_DIR, 'checkpoints')
+  os.makedirs(checkpoints_dir, exist_ok=True)
+  checkpoint_name = str(input("Checkpoints Directory -> "))
+  if checkpoint_name == "":
+    print("Please fill in the target directory name")
+  CHECKPOINTS_DIR = os.path.join(checkpoints_dir, checkpoint_name)
+  os.makedirs(CHECKPOINTS_DIR, exist_ok=True)
+
+  history = {
+    'epoch':[],
+    'train_loss':[],
+    'val_accuracy':[]
+  }
+
+  mgr = Manager()
+  train_dataset = mgr.list()
+  train_label_dataset = mgr.list()
+  val_dataset = mgr.list()
+  val_label_dataset = mgr.list()
+  
+  train_df = pd.read_csv(os.path.join(config.DATA_DIR, 'train_split_Depression_AVEC2017.csv'))
+  val_df = pd.read_csv(os.path.join(config.DATA_DIR, 'dev_split_Depression_AVEC2017.csv'))
+  
+  train_id = train_df.Participant_ID.tolist()
+  val_id = val_df.Participant_ID.tolist()
+  train_label = train_df.PHQ8_Binary.tolist()
+  val_label = val_df.PHQ8_Binary.tolist()
+  train_zip = zip(train_id, train_label)
+  val_zip = zip(val_id, val_label)
+
+  with Pool(processes=10) as p:
+    with tqdm(total=len(train_id)) as pbar:
+      for v in p.imap_unordered(partial(read_v, dataset=train_dataset, label_dataset=train_label_dataset), train_zip):
+        pbar.update()
+
+    with tqdm(total=len(val_id)) as pbar:
+      for v in p.imap_unordered(partial(read_v, dataset=val_dataset, label_dataset=val_label_dataset),val_zip):
+        pbar.update()
+
+  # train_dataset: (id*B, seq_len, v_columns)
+  # train_label_dataset: (id*B,)
+  input_dim = len(train_dataset[0][0])
+
+  train_data = LSTM_NCE_DATASET(train_dataset, train_label_dataset)
+  del train_dataset
+  val_data = LSTM_NCE_DATASET(val_dataset, val_label_dataset)
+  del val_dataset
+
+  train_loader = DataLoader(train_data, batch_size=16, num_workers=2, shuffle=True, pin_memory=True, collate_fn=collate_batch)
+  val_loader = DataLoader(val_data, batch_size=16, num_workers=2, shuffle=True, pin_memory=True, collate_fn=collate_batch)
+  
+  # train setting
+  EPOCH = 15
+  hidden_dim = 128
+  output_dim = 64
+  first_batch = True
+
+  model = NCEModel(input_dim, hidden_dim, output_dim)
+  queue = Queue(output_dim)
+  optimizer = torch.optim.Adam(model.encoder_q.parameters(), lr=1e-3)
+  scheduler = lr_scheduler.StepLR(optimizer, step_size=15, gamma=0.1)
+  
+  device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+  model.to(device)
+  queue.to(device)
+
+  print("Train Start")
+
+  for epoch in range(EPOCH):
+    train_avg_loss = train(model, train_loader, queue, optimizer, device, first_batch)
+    first_batch=False
+    val_accuracy = validation_knn(model, train_loader, val_loader, device)
+
+    history['epoch'].append(epoch+1)
+    history['train_loss'].append(train_avg_loss)
+    history['val_accuracy'].append(val_accuracy)
+
+    print("#" + str(epoch) + "/" + str(EPOCH) + " loss:" +
+                str(train_avg_loss) + " accuracy:" + str(val_accuracy))
+    
+    checkpoint = {
+        'epoch': epoch,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'scheduler_state_dict': scheduler.state_dict(),
+        'history': history
+    }
+
+    checkpoint_path = os.path.join(CHECKPOINTS_DIR, f"checkpoint_epoch{epoch}.pth")
+    torch.save(checkpoint, checkpoint_path)
+    print(f"Checkpoint saved: {checkpoint_path}")
+
+  # 학습 완료 후 그래프 생성
+  print("\nGenerating training history plots...")
+
+  # 디렉토리 생성
+  plots_dir = os.path.join(CHECKPOINTS_DIR, "plots")
+  if not os.path.exists(plots_dir):
+      os.makedirs(plots_dir)
+
+  epochs_range = range(len(history['train_loss']))
+
+  # Loss 그래프
+  plt.figure(figsize=(12, 5))
+  plt.subplot(1, 1, 1)
+  plt.plot(epochs_range, history['train_loss'], 'b-', label='Train Loss')
+  plt.xlabel('Epoch')
+  plt.ylabel('Loss')
+  plt.title('Training Loss')
+  plt.legend()
+  plt.grid(True)
+
+  # Accuracy 그래프
+  plt.subplot(1, 1, 2)
+  plt.plot(epochs_range, history['val_accuracy'], 'r-', label='Val Accuracy')
+  plt.xlabel('Epoch')
+  plt.ylabel('Accuracy')
+  plt.title('Validation Accuracy')
+  plt.legend()
+  plt.grid(True)
+
+  plt.tight_layout()
+  plt.savefig(os.path.join(plots_dir, f'training_history.png'), dpi=300)
+  print(f"Plot saved: {os.path.join(plots_dir, f'training_history.png')}")
+
+  # 히스토리를 JSON으로 저장
+  history_path = os.path.join(CHECKPOINTS_DIR, f'training_history.json')
+  with open(history_path, 'w') as f:
+      json.dump(history, f, indent=4)
+  print(f"History saved: {history_path}")
+
+  print("\nTraining completed!")
+  print(f"Best validation loss: {min(history['val_loss']):.4f}")
+  print(f"Best validation accuracy: {max(history['val_accuracy']):.4f}")
+
+if __name__=="__main__":
+  main()
