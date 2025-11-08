@@ -236,6 +236,7 @@ def main():
   # train_dataset: (id*B, seq_len, v_columns)
   # train_label_dataset: (id*B,)
   input_dim = len(train_dataset[0][0])
+  print("Current Feature Dimenseion:", input_dim)
 
   train_data = LSTM_NCE_DATASET(train_dataset, train_label_dataset)
   del train_dataset
