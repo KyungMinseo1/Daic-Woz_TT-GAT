@@ -1,4 +1,4 @@
-import os, config
+import os, config_path
 import pandas as pd
 import numpy as np
 import torch
@@ -36,8 +36,8 @@ def read_v(zip, dataset, label_dataset):
 
     VISION = []
 
-    t_df = pd.read_csv(os.path.join(config.DATA_DIR, 'Transcription', f'{id}_transcript.csv'))
-    v_df = pd.read_csv(os.path.join(config.DATA_DIR, 'Vision Summary', f'{id}_vision_summary.csv'))
+    t_df = pd.read_csv(os.path.join(config_path.DATA_DIR, 'Transcription', f'{id}_transcript.csv'))
+    v_df = pd.read_csv(os.path.join(config_path.DATA_DIR, 'Vision Summary', f'{id}_vision_summary.csv'))
 
     _, group_df = process_transcription(t_df)
     vision = process_vision(v_df)
@@ -69,8 +69,8 @@ if __name__=="__main__":
   val_dataset = mgr.list()
   val_label_dataset = mgr.list()
   
-  train_df = pd.read_csv(os.path.join(config.DATA_DIR, 'train_split_Depression_AVEC2017.csv'))
-  val_df = pd.read_csv(os.path.join(config.DATA_DIR, 'dev_split_Depression_AVEC2017.csv'))
+  train_df = pd.read_csv(os.path.join(config_path.DATA_DIR, 'train_split_Depression_AVEC2017.csv'))
+  val_df = pd.read_csv(os.path.join(config_path.DATA_DIR, 'dev_split_Depression_AVEC2017.csv'))
   
   train_id = train_df.Participant_ID.tolist()
   val_id = val_df.Participant_ID.tolist()
