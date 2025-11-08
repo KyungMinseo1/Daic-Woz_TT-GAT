@@ -1,7 +1,5 @@
 import os, config_path
 import pandas as pd
-import numpy as np
-import torch
 from multiprocessing import Manager
 from multiprocessing.pool import Pool
 from tqdm import tqdm

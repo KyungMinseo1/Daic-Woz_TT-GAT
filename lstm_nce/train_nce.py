@@ -241,10 +241,10 @@ def main():
   val_loader = DataLoader(val_data, batch_size=config['training']['bs'], num_workers=config['training']['workers'], shuffle=False, pin_memory=True, collate_fn=collate_batch)
   
   # train setting
-  hidden_dim = config['training']['h_dim']
-  output_dim = config['training']['o_dim']
+  hidden_dim = config['model']['h_dim']
+  output_dim = config['model']['o_dim']
 
-  model = NCEModel(input_dim, hidden_dim, output_dim, num_layers=config['training']['depth'], dropout=config['training']['dropout'], temperature=config['training']['T'])
+  model = NCEModel(input_dim, hidden_dim, output_dim, num_layers=config['model']['depth'], dropout=config['model']['dropout'], temperature=config['model']['T'])
   queue = Queue(output_dim=output_dim, queue_size=config['training']['q_size'])
   optimizer = torch.optim.Adam(model.encoder_q.parameters(), lr=config['training']['lr'])
   scheduler = lr_scheduler.StepLR(optimizer, step_size=config['training']['step-size'], gamma=config['training']['gamma'])
@@ -258,13 +258,18 @@ def main():
   if opt.resume and os.path.exists(opt.resume):
     print(f"Loading checkpoint from {opt.resume}")
     checkpoint = torch.load(opt.resume)
-    
-    model.load_state_dict(checkpoint['model_state_dict'])
-    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-    scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-    queue.load_state_dict(checkpoint['queue_state_dict'])
-    starting_epoch = checkpoint['epoch'] + 1
-    history = checkpoint['history']
+
+    try:
+      model.load_state_dict(checkpoint['model_state_dict'])
+      optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+      scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+      queue.load_state_dict(checkpoint['queue_state_dict'])
+      starting_epoch = checkpoint['epoch'] + 1
+      history = checkpoint['history']
+    except Exception as e:
+      print("Error Resuming:", e)
+      print("Check your configuration files.")
+      return
     
     print(f"Resuming from epoch {starting_epoch}")
     print(f"Previous best val_loss: {min(history['val_loss']) if history['val_loss'] else 'N/A'}")
@@ -297,7 +302,7 @@ def main():
         'optimizer_state_dict': optimizer.state_dict(),
         'scheduler_state_dict': scheduler.state_dict(),
         'queue_state_dict' : queue.state_dict(),
-        'configs' : config,
+        'config' : config,
         'history': history
     }
 
