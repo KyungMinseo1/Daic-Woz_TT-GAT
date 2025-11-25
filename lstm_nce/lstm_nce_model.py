@@ -94,5 +94,5 @@ class NCEModel(nn.Module):
 
     loss = -mean_log_prob_pos.mean()
 
-    return loss
+    return loss, q_feat.std(dim=0).mean()
 

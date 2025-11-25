@@ -32,7 +32,7 @@ def collate_batch(batch):
   return x_padded, lengths, labels
 
 @torch.no_grad()
-def update_momentum_encoder(encoder_k, encoder_q, m=0.999):
+def update_momentum_encoder(encoder_k, encoder_q, m=0.99):
   for param_q, param_k in zip(encoder_q.parameters(), encoder_k.parameters()):
     param_k.data = param_k.data * m + param_q.data * (1. - m)
 
@@ -77,7 +77,7 @@ class Queue(nn.Module):
 
     self.queue_ptr[0] = end # type: ignore
 
-def train(model, dataloader, queue, optimizer, device, warmup=False):
+def train(model, dataloader, queue, optimizer, device, config, warmup=False):
   model.encoder_q.train()
   model.encoder_k.eval()
 
@@ -94,14 +94,14 @@ def train(model, dataloader, queue, optimizer, device, warmup=False):
         queue.dequeue_and_enqueue(new_k, y)
       continue
 
-    loss = model(x, x_len, y, queue.queue, queue.queue_labels)
+    loss, q_std = model(x, x_len, y, queue.queue, queue.queue_labels)
     optimizer.zero_grad()
     loss.backward()
     optimizer.step()
 
     # compute key features (momentum encoder)
     with torch.no_grad():
-      update_momentum_encoder(model.encoder_k, model.encoder_q)
+      update_momentum_encoder(model.encoder_k, model.encoder_q, config['training']['M'])
       new_k = F.normalize(model.encoder_k(x, x_len), dim=1)
 
     with torch.no_grad():
@@ -112,12 +112,19 @@ def train(model, dataloader, queue, optimizer, device, warmup=False):
 
     current_lr = optimizer.param_groups[0]['lr']
 
+    total_norm = 0
+    for p in model.encoder_q.parameters():
+      if p.grad is not None:
+        total_norm += p.grad.norm(2).item() ** 2
+
     # Update progress bar with detailed info
     pbar.set_postfix({
       'loss': f'{loss.item():.4f}',
       'avg': f'{avg_loss:.4f}',
       'lr': f'{current_lr:.2e}',
-      'batch': f'{batch_idx+1}/{num_batches}'
+      'batch': f'{batch_idx+1}/{num_batches}',
+      'grad_norm': f'{total_norm**0.5}',
+      'feat_std': f'{q_std}'
     })
 
   return avg_loss if not warmup else 0.0
@@ -250,10 +257,13 @@ def main():
   hidden_dim = config['model']['h_dim']
   output_dim = config['model']['o_dim']
 
-  model = NCEModel(input_dim, hidden_dim, output_dim, num_layers=config['model']['depth'], dropout=config['model']['dropout'], temperature=config['model']['T'])
+  model = NCEModel(input_dim, hidden_dim, output_dim, num_layers=config['model']['depth'], dropout=config['model']['dropout'], temperature=config['training']['T'])
   queue = Queue(output_dim=output_dim, queue_size=config['training']['q_size'])
-  optimizer = torch.optim.Adam(model.encoder_q.parameters(), lr=config['training']['lr'])
-  scheduler = lr_scheduler.StepLR(optimizer, step_size=config['training']['step-size'], gamma=config['training']['gamma'])
+  optimizer = torch.optim.SGD(model.encoder_q.parameters(), lr=config['training']['lr'])
+  if config['training']['scheduler'] == 'steplr':
+    scheduler = lr_scheduler.StepLR(optimizer, step_size=config['training']['step-size'], gamma=config['training']['gamma'])
+  else:
+    scheduler = lr_scheduler.CosineAnnealingLR(optimizer, T_max=opt.num_epochs)
   
   device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -290,7 +300,7 @@ def main():
     warmup = epoch <= opt.warmup_epochs
     if warmup:
       print(f"\n[Warm-up Epoch {epoch}/{opt.warmup_epochs}] Filling queue only...")
-    train_avg_loss = train(model, train_loader, queue, optimizer, device, warmup)
+    train_avg_loss = train(model, train_loader, queue, optimizer, device, config, warmup)
     if warmup:
       continue
     val_accuracy = validation_knn(model, train_loader, val_loader, device)
