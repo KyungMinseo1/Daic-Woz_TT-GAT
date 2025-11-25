@@ -9,10 +9,10 @@ from multiprocessing import Manager
 from multiprocessing.pool import Pool
 from tqdm import tqdm
 from functools import partial
-from lstm_nce_model import NCEModel
+from lstm_nce_with_bce_model import NBCEModel
 from prepare_dataset_vision_nce import read_v
 import pandas as pd
-import os, config_path, json
+import os, config_path, json, collections
 
 # OpenMP / MKL 충돌 방지용 설정
 os.environ["OMP_NUM_THREADS"] = "1"
@@ -77,24 +77,27 @@ class Queue(nn.Module):
 
     self.queue_ptr[0] = end # type: ignore
 
-def train(model, dataloader, queue, optimizer, device, warmup=False):
+def train(model, dataloader, queue, optimizer, device, criterion, lmbda, warmup=False):
   model.encoder_q.train()
   model.encoder_k.eval()
 
   total_loss = 0.0
   num_batches = len(dataloader)
   pbar = tqdm(dataloader, desc='Training', ncols=120)
+  total_correct = 0
+  total_count = 0
 
   for batch_idx, (x, x_len, y) in enumerate(pbar):
     x, x_len, y = x.to(device), x_len.to(device), y.to(device)
 
     if warmup:
       with torch.no_grad():
-        new_k = F.normalize(model.encoder_k(x, x_len), dim=1)
+        k_feat, _ = model.encoder_k(x, x_len)
+        new_k = F.normalize(k_feat, dim=1)
         queue.dequeue_and_enqueue(new_k, y)
       continue
 
-    loss = model(x, x_len, y, queue.queue, queue.queue_labels)
+    loss, correct_sum = model(x, x_len, y, queue.queue, queue.queue_labels, criterion, lmbda)
     optimizer.zero_grad()
     loss.backward()
     optimizer.step()
@@ -102,13 +105,16 @@ def train(model, dataloader, queue, optimizer, device, warmup=False):
     # compute key features (momentum encoder)
     with torch.no_grad():
       update_momentum_encoder(model.encoder_k, model.encoder_q)
-      new_k = F.normalize(model.encoder_k(x, x_len), dim=1)
+      k_feat, _ = model.encoder_k(x, x_len)
+      new_k = F.normalize(k_feat, dim=1)
 
     with torch.no_grad():
       queue.dequeue_and_enqueue(new_k, y)
 
     total_loss += loss.item()
     avg_loss = total_loss / (batch_idx + 1)
+    total_correct += correct_sum
+    total_count += x.size(0)
 
     current_lr = optimizer.param_groups[0]['lr']
 
@@ -117,12 +123,15 @@ def train(model, dataloader, queue, optimizer, device, warmup=False):
       'loss': f'{loss.item():.4f}',
       'avg': f'{avg_loss:.4f}',
       'lr': f'{current_lr:.2e}',
+      'correct_rate':f'{total_correct/total_count:.4f}',
       'batch': f'{batch_idx+1}/{num_batches}'
     })
 
-  return avg_loss if not warmup else 0.0
+  total_correct_rate = total_correct/total_count
 
-def validation_knn(model, train_loader, val_loader, device, k=5, batch_size=256):
+  return avg_loss if not warmup else 0.0, total_correct_rate
+
+def validation_knn(model, train_loader, val_loader, device, criterion, lmbda, k=5, batch_size=256):
   model.encoder_k.eval()
   
   print("Building feature bank from training set...")
@@ -131,7 +140,8 @@ def validation_knn(model, train_loader, val_loader, device, k=5, batch_size=256)
   with torch.no_grad():
     for x, x_len, y in tqdm(train_loader, desc='Feature Bank', ncols=100):
       x, x_len, y = x.to(device), x_len.to(device), y.to(device)
-      features = F.normalize(model.encoder_k(x, x_len), dim=1)
+      k_feat, _ = model.encoder_k(x, x_len)
+      features = F.normalize(k_feat, dim=1)
       train_features.append(features.cpu())  # CPU로 이동하여 메모리 절약
       train_labels.append(y.cpu())
   
@@ -141,13 +151,15 @@ def validation_knn(model, train_loader, val_loader, device, k=5, batch_size=256)
   print(f"Running KNN validation (k={k})...")
   correct = 0
   total = 0
+  num_batches = len(val_loader)
 
   with torch.no_grad():
     pbar = tqdm(val_loader, desc='KNN Validation', ncols=120)
-    for x, x_len, y in pbar:
+    for batch_idx, (x, x_len, y) in enumerate(pbar):
       x, x_len, y = x.to(device), x_len.to(device), y.to(device)
       
-      features = F.normalize(model.encoder_k(x, x_len), dim=1)
+      k_feat, _ = model.encoder_k(x, x_len)
+      features = F.normalize(k_feat, dim=1)
       
       batch_predictions = []
       for i in range(0, train_features.size(0), batch_size):
@@ -167,7 +179,8 @@ def validation_knn(model, train_loader, val_loader, device, k=5, batch_size=256)
       
       pbar.set_postfix({
           'acc': f'{correct/total:.4f}',
-          'correct': f'{correct}/{total}'
+          'correct_knn': f'{correct}/{total}',
+          'batch': f'{batch_idx+1}/{num_batches}'
       })
   accuracy = correct / total
   print(f"\nKNN Validation Accuracy (k={k}): {accuracy:.4f}")
@@ -224,7 +237,7 @@ def main():
   train_zip = zip(train_id, train_label)
   val_zip = zip(val_id, val_label)
 
-  with Pool(processes=10) as p:
+  with Pool(processes=2) as p:
     with tqdm(total=len(train_id)) as pbar:
       for v in p.imap_unordered(partial(read_v, dataset=train_dataset, label_dataset=train_label_dataset), train_zip):
         pbar.update()
@@ -238,6 +251,19 @@ def main():
   input_dim = len(train_dataset[0][0])
   print("Current Feature Dimenseion:", input_dim)
 
+  print("__TRAINING STATS__")
+  train_counters = collections.Counter(label for label in train_label_dataset)
+  print(train_counters)
+  
+  class_weights = train_counters[0] / train_counters[1]
+  print("Weights", class_weights)
+
+  print("__VALIDATION STATS__")
+  val_counters = collections.Counter(label for label in val_label_dataset)
+  print(val_counters)
+  print("___________________")
+
+
   train_data = LSTM_NCE_DATASET(train_dataset, train_label_dataset)
   del train_dataset
   val_data = LSTM_NCE_DATASET(val_dataset, val_label_dataset)
@@ -250,7 +276,8 @@ def main():
   hidden_dim = config['model']['h_dim']
   output_dim = config['model']['o_dim']
 
-  model = NCEModel(input_dim, hidden_dim, output_dim, num_layers=config['model']['depth'], dropout=config['model']['dropout'], temperature=config['model']['T'])
+  model = NBCEModel(input_dim, hidden_dim, output_dim, num_layers=config['model']['depth'], dropout=config['model']['dropout'], temperature=config['model']['T'])
+  criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([class_weights]))
   queue = Queue(output_dim=output_dim, queue_size=config['training']['q_size'])
   optimizer = torch.optim.Adam(model.encoder_q.parameters(), lr=config['training']['lr'])
   scheduler = lr_scheduler.StepLR(optimizer, step_size=config['training']['step-size'], gamma=config['training']['gamma'])
@@ -290,10 +317,10 @@ def main():
     warmup = epoch <= opt.warmup_epochs
     if warmup:
       print(f"\n[Warm-up Epoch {epoch}/{opt.warmup_epochs}] Filling queue only...")
-    train_avg_loss = train(model, train_loader, queue, optimizer, device, warmup)
+    train_avg_loss = train(model=model, dataloader=train_loader, queue=queue, optimizer=optimizer, device=device, criterion=criterion, lmbda=config['training']['lambda'], warmup=warmup)
     if warmup:
       continue
-    val_accuracy = validation_knn(model, train_loader, val_loader, device)
+    val_accuracy = validation_knn(model=model, train_loader=train_loader, val_loader=val_loader, device=device, criterion=criterion, lmbda=config['training']['lambda'])
 
     history['epoch'].append(epoch)
     history['train_loss'].append(train_avg_loss)
