@@ -1,0 +1,14 @@
+training:
+  lr: 0.0001
+  weight-decay: 0.0001
+  bs: 8
+  scheduler: 'steplr'
+  workers: 4
+  embed_model: 'all-MiniLM-L6-v2'
+  gamma: 0.5
+  step-size: 25
+
+model:
+  h_dim: 1024
+  head: 8
+  dropout: 0.3

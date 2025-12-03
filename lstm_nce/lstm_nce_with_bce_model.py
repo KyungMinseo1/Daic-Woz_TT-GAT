@@ -63,16 +63,17 @@ class NBCEModel(nn.Module):
     q_logits, q_pred = self.encoder_q(q, q_len)
 
     q_feat = F.normalize(q_logits, dim=1)  # (B, D)
+    q_label_float = q_label.float().unsqueeze(1)
 
     if isinstance(criterion, nn.BCELoss):
       q_prob = nn.Sigmoid(q_pred)
-      bce_loss = criterion(q_prob, q_label)
+      bce_loss = criterion(q_prob, q_label_float)
     elif isinstance(criterion, nn.BCEWithLogitsLoss):
-      bce_loss = criterion(q_pred, q_label)
+      bce_loss = criterion(q_pred, q_label_float)
     else:
       print("No Criterion: Skipping BCE_Loss")
 
-    correct_sum = ((torch.sigmoid(q_pred) > 0.5).int() == q_label).float().sum()
+    correct_sum = ((torch.sigmoid(q_pred) > 0.5).int() == q_label_float.int()).float().sum()
 
     with torch.no_grad():
       k_logits, _ = self.encoder_k(q, q_len)
