@@ -134,9 +134,11 @@ def train(model, dataloader, queue, optimizer, device, config, criterion, lmbda,
       'batch': f'{batch_idx+1}/{num_batches}'
     })
 
-  total_correct_rate = total_correct/total_count
-
-  return avg_loss if not warmup else 0.0, total_correct_rate
+  if warmup:
+    return avg_loss if not warmup else 0.0, _
+  else:
+    total_correct_rate = total_correct/total_count
+    return avg_loss if not warmup else 0.0, total_correct_rate
 
 def validation_knn(model, train_loader, val_loader, device, criterion, lmbda, k=5, batch_size=256):
   model.encoder_k.eval()
@@ -225,6 +227,7 @@ def main():
   history = {
     'epoch':[],
     'train_loss':[],
+    'train_correct':[],
     'val_accuracy':[]
   }
 
@@ -244,7 +247,7 @@ def main():
   train_zip = zip(train_id, train_label)
   val_zip = zip(val_id, val_label)
 
-  with Pool(processes=2) as p:
+  with Pool(processes=10) as p:
     with tqdm(total=len(train_id)) as pbar:
       for v in p.imap_unordered(partial(read_v, dataset=train_dataset, label_dataset=train_label_dataset), train_zip):
         pbar.update()
@@ -282,17 +285,17 @@ def main():
   # train setting
   hidden_dim = config['model']['h_dim']
   output_dim = config['model']['o_dim']
+  
+  device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
   model = NBCEModel(input_dim, hidden_dim, output_dim, num_layers=config['model']['depth'], dropout=config['model']['dropout'], temperature=config['training']['T'])
-  criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([class_weights]))
+  criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([class_weights]).to(device))
   queue = Queue(output_dim=output_dim, queue_size=config['training']['q_size'])
   optimizer = torch.optim.SGD(model.encoder_q.parameters(), lr=config['training']['lr'])
   if config['training']['scheduler'] == 'steplr':
     scheduler = lr_scheduler.StepLR(optimizer, step_size=config['training']['step-size'], gamma=config['training']['gamma'])
   else:
     scheduler = lr_scheduler.CosineAnnealingLR(optimizer, T_max=opt.num_epochs)
-  
-  device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
   model.to(device)
   queue.to(device)
@@ -323,24 +326,25 @@ def main():
 
   patience = 0
 
-  for epoch in range(starting_epoch, opt.num_epochs + 1):
+  for epoch in range(starting_epoch, opt.num_epochs + 1 + opt.warmup_epochs):
     warmup = epoch <= opt.warmup_epochs
     if warmup:
       print(f"\n[Warm-up Epoch {epoch}/{opt.warmup_epochs}] Filling queue only...")
-    train_avg_loss = train(model=model, dataloader=train_loader, queue=queue, optimizer=optimizer, device=device, config=config, criterion=criterion, lmbda=config['training']['lambda'], warmup=warmup)
+    train_avg_loss, total_correct_rate = train(model=model, dataloader=train_loader, queue=queue, optimizer=optimizer, device=device, config=config, criterion=criterion, lmbda=config['training']['lambda'], warmup=warmup)
     if warmup:
       continue
     val_accuracy = validation_knn(model=model, train_loader=train_loader, val_loader=val_loader, device=device, criterion=criterion, lmbda=config['training']['lambda'])
 
     history['epoch'].append(epoch)
     history['train_loss'].append(train_avg_loss)
+    history['train_correct'].append(total_correct_rate)
     history['val_accuracy'].append(val_accuracy)
 
     print("#" + str(epoch) + "/" + str(opt.num_epochs) + " loss:" +
                 str(train_avg_loss) + " accuracy:" + str(val_accuracy))
     
     checkpoint = {
-        'epoch': epoch,
+        'epoch': epoch-opt.warmup_epochs,
         'model_state_dict': model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
         'scheduler_state_dict': scheduler.state_dict(),
