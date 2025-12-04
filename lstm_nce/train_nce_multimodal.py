@@ -1,4 +1,4 @@
-import os, config_path, sys, json, collections, yaml, argparse, gc
+import os, config_path, sys, json, yaml, argparse, gc
 import pandas as pd
 import matplotlib.pyplot as plt
 from tqdm import tqdm
@@ -12,9 +12,10 @@ from torch.utils.data import DataLoader
 from torch.optim import lr_scheduler
 from torch.nn.utils.rnn import pad_sequence
 
-from multiprocessing import Manager
-from multiprocessing.pool import Pool
-from functools import partial
+from gensim.models import KeyedVectors
+
+import nltk
+from nltk.corpus import stopwords
 
 from lstm_nce_multimodal import NCEMultimodalModel
 from prepare_dataset_vision_nce_multimodal import vectorize_t_and_read_v
@@ -96,22 +97,27 @@ def train(model, dataloader, x_queue, x2_queue, optimizer, device, config, crite
     # x = transcription data, x2 = different modality data
     x, x_len, x2, x2_len = x.to(device), x_len.to(device), x2.to(device), x2_len.to(device)
 
+    if torch.isnan(x).any() or torch.isinf(x).any():
+      logger.info("입력 데이터 X에 NaN/Inf 발견!")
+
     if warmup:
       with torch.no_grad():
-        k_feat, _ = model.encoder_k(x, x_len)
+        k_feat, _ = model.encoder_x_k(x, x_len)
         k = F.normalize(k_feat, dim=1)
         x_queue.dequeue_and_enqueue(k)
-        k2_feat, _ = model.encoder_k(x2, x2_len)
+        k2_feat, _ = model.encoder_x2_k(x2, x2_len)
         k2 = F.normalize(k2_feat, dim=1)
         x2_queue.dequeue_and_enqueue(k2)
       continue
 
-    result1, result2, k, q_std = model(x, x_len, x2, x2_len, x_queue.queue, x2_queue.queue)
+    result1, result2, k, q_std = model(x, x_len, x2, x2_len, x_queue.queue.clone().detach(), x2_queue.queue.clone().detach())
+    logger.info(f"Logits1 Max: {result1[0].max().item()}")
     loss1 = criterion(result1[0]/temperature, result1[1])
     loss2 = criterion(result2[0]/temperature, result2[1])
     final_loss = loss1 + loss2
     optimizer.zero_grad()
     final_loss.backward()
+    torch.nn.utils.clip_grad_norm_(list(model.encoder_x_q.parameters())+list(model.encoder_x2_q.parameters()), max_norm=1.0)
     optimizer.step()
 
     # compute key features (momentum encoder)
@@ -148,7 +154,10 @@ def train(model, dataloader, x_queue, x2_queue, optimizer, device, config, crite
       'batch': f'{batch_idx+1}/{num_batches}'
     })
 
-  return avg_loss
+  if warmup:
+    return 0.0
+  else:
+    return avg_loss
 """
 def validation_knn(model, train_loader, val_loader, device, criterion, lmbda, k=5, batch_size=256):
   model.encoder_k.eval()
@@ -206,8 +215,6 @@ def main():
   parser = argparse.ArgumentParser()
   parser.add_argument('--num_epochs', default=100, type=int,
                       help='Number of training epochs.')
-  parser.add_argument('--workers', default=2, type=int,
-                      help='Number of data loader workers.')
   parser.add_argument('--resume', default='', type=str, metavar='PATH',
                       help='Path to latest checkpoint (default: none).')
   parser.add_argument('--config', type=str, default='lstm_nce/configs/architecture.yaml',
@@ -238,11 +245,8 @@ def main():
     # 'val_accuracy':[]
   }
 
-  mgr = Manager()
-  train_transcription_dataset = mgr.list()
-  train_vision_dataset = mgr.list()
-  val_transcription_dataset = mgr.list()
-  val_vision_dataset = mgr.list()
+  train_transcription_dataset = []
+  train_vision_dataset = []
   
   train_df = pd.read_csv(os.path.join(config_path.DATA_DIR, 'train_split_Depression_AVEC2017.csv'))
   val_df = pd.read_csv(os.path.join(config_path.DATA_DIR, 'dev_split_Depression_AVEC2017.csv'))
@@ -250,30 +254,41 @@ def main():
   train_id = train_df.Participant_ID.tolist()
   val_id = val_df.Participant_ID.tolist()
 
-  with Pool(processes=4) as p:
-    with tqdm(total=len(train_id)) as pbar:
-      for v in p.imap_unordered(partial(vectorize_t_and_read_v, dataset=train_transcription_dataset, dataset2=train_vision_dataset), train_id):
-        pbar.update()
+  logger.info("Loading GLOVE")
+  glove_kv_path = os.path.join(config_path.MODEL_DIR, "glove_model.kv")
 
-    with tqdm(total=len(val_id)) as pbar:
-      for v in p.imap_unordered(partial(vectorize_t_and_read_v, dataset=val_transcription_dataset, dataset2=val_vision_dataset), val_id):
-        pbar.update()
+  assert os.path.exists(glove_kv_path), "No GLOVE Model"
+
+  # Defining GLOVE
+  try:
+    glove_model = KeyedVectors.load(glove_kv_path)
+    logger.info("Loaded GLOVE")
+  except Exception as e:
+    logger.error(f"Problem with your GLOVE: {e}")
+
+  # Defining STOPWORDS
+  nltk.download('stopwords')
+  stop_words_list = stopwords.words('english')
+  logger.info("Loaded Stopwords")
+
+  for id in tqdm(train_id+val_id, desc="Preparing Data -> "):
+    vectorize_t_and_read_v(id, train_transcription_dataset, train_vision_dataset, glove_model, stop_words_list)
+    
   logger.info("Dataset Ready")
   # train_vision_dataset: (id*B, seq_len, v_columns)
   x_input_dim = len(train_transcription_dataset[0][0])
   x2_input_dim = len(train_vision_dataset[0][0])
-  logger.info("Current Transcription Dimenseion:", x_input_dim)
-  logger.info("Current Multimodal Dimenseion:", x2_input_dim)
+  logger.info(f"Current Transcription Dimenseion: {x_input_dim}")
+  logger.info(f"Current Multimodal Dimenseion: {x2_input_dim}")
 
   train_data = LSTM_NCE_Multimodal_DATASET(train_transcription_dataset, train_vision_dataset)
-  del train_transcription_dataset, train_vision_dataset
-  val_data = LSTM_NCE_Multimodal_DATASET(val_transcription_dataset, val_vision_dataset)
-  del val_transcription_dataset, val_vision_dataset
+  del train_transcription_dataset, train_vision_dataset, glove_model, stop_words_list
+  gc.collect()
+  torch.cuda.empty_cache()
 
   logger.info("DataLoader Ready")
   train_loader = DataLoader(train_data, batch_size=config['training']['bs'], num_workers=config['training']['workers'], shuffle=True, pin_memory=True, collate_fn=collate_batch)
-  val_loader = DataLoader(val_data, batch_size=config['training']['bs'], num_workers=config['training']['workers'], shuffle=False, pin_memory=True, collate_fn=collate_batch)
-  
+
   # train setting
   hidden_dim = config['model']['h_dim']
   output_dim = config['model']['o_dim']
@@ -314,6 +329,8 @@ def main():
       logger.error("Check your configuration files.")
       return
     
+    del checkpoint
+    gc.collect()
     logger.info(f"Resuming from epoch {starting_epoch}")
     logger.info(f"Previous best val_loss: {min(history['val_loss']) if history['val_loss'] else 'N/A'}")
   else:
@@ -380,7 +397,7 @@ def main():
 
   # Loss 그래프
   plt.figure(figsize=(12, 5))
-  plt.subplot(1, 2, 1)
+  plt.subplot(1, 1, 1)
   plt.plot(epochs_range, history['train_loss'], 'b-', label='Train Loss')
   plt.xlabel('Epoch')
   plt.ylabel('Loss')
@@ -388,6 +405,7 @@ def main():
   plt.legend()
   plt.grid(True)
 
+  """
   # Accuracy 그래프
   plt.subplot(1, 2, 2)
   plt.plot(epochs_range, history['val_accuracy'], 'r-', label='Val Accuracy')
@@ -396,7 +414,7 @@ def main():
   plt.title('Validation Accuracy')
   plt.legend()
   plt.grid(True)
-
+  """
   plt.tight_layout()
   plt.savefig(os.path.join(plots_dir, f'training_history.png'), dpi=300)
   logger.info(f"Plot saved: {os.path.join(plots_dir, f'training_history.png')}")
@@ -408,14 +426,14 @@ def main():
   logger.info(f"History saved: {history_path}")
 
   logger.info("\nTraining completed!")
-  logger.info(f"Best validation loss: {min(history['val_loss']):.4f}")
-  logger.info(f"Best validation accuracy: {max(history['val_accuracy']):.4f}")
+  logger.info(f"Best Train loss: {min(history['train_loss']):.4f}")
+  # logger.info(f"Best validation accuracy: {max(history['val_accuracy']):.4f}")
 
 if __name__=="__main__":
   main()
 
 # first
-#   ex) python lstm_nce/train_nce.py
-#     -> epochs: 100, workers: 2, config_file: lstm_nce/configs/architecture.yaml, save_path: checkpoints/checkpoints1, patience: 10, warmup_for_queue: 3
+#   ex) python lstm_nce/train_nce_multimodal.py --save_dir checkpoints_nce --save_dir_ multimodal_nce_1 --warmup_epochs 1
+#     -> epochs: 100, config_file: lstm_nce/configs/architecture.yaml, save_path: checkpoints/checkpoints1, patience: 10, warmup_for_queue: 3
 # resume
 #   ex) python lstm_nce/train_nce.py --resume checkpoints/checkpoints1/best_model.pth

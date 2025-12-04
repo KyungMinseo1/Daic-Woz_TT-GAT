@@ -208,6 +208,6 @@ __marimo__/
 
 # Extra
 /data
-/checkpoints
+checkpoints*
 /documents
-/checkpoints_graph
+/model
