@@ -89,9 +89,10 @@ def train(model, dataloader, x_queue, x2_queue, optimizer, device, config, crite
   model.encoder_x2_k.eval()
 
   total_loss = 0.0
+  total_x_std = 0.0
+  total_x2_std = 0.0
   num_batches = len(dataloader)
   pbar = tqdm(dataloader, desc='Training', ncols=120)
-  total_count = 0
 
   for batch_idx, (x, x_len, x2, x2_len) in enumerate(pbar):
     # x = transcription data, x2 = different modality data
@@ -111,13 +112,12 @@ def train(model, dataloader, x_queue, x2_queue, optimizer, device, config, crite
       continue
 
     result1, result2, k, q_std = model(x, x_len, x2, x2_len, x_queue.queue.clone().detach(), x2_queue.queue.clone().detach(), is_sample)
-    logger.info(f"Logits1 Max: {result1[0].max().item()}")
     loss1 = criterion(result1[0]/temperature, result1[1])
     loss2 = criterion(result2[0]/temperature, result2[1])
     final_loss = loss1 + loss2
     optimizer.zero_grad()
     final_loss.backward()
-    torch.nn.utils.clip_grad_norm_(list(model.encoder_x_q.parameters())+list(model.encoder_x2_q.parameters()), max_norm=1.0)
+    # torch.nn.utils.clip_grad_norm_(list(model.encoder_x_q.parameters())+list(model.encoder_x2_q.parameters()), max_norm=5.0)
     optimizer.step()
 
     # compute key features (momentum encoder)
@@ -130,10 +130,14 @@ def train(model, dataloader, x_queue, x2_queue, optimizer, device, config, crite
       x2_queue.dequeue_and_enqueue(k[1])
 
     total_loss += final_loss.item()
-    avg_loss = total_loss / (batch_idx + 1)
-    total_count += x.size(0)
+    total_x_std += q_std[0]
+    total_x2_std += q_std[1]
 
-    current_lr = optimizer.param_groups[0]['lr']
+    avg_loss = total_loss / (batch_idx + 1)
+    avg_x_std = total_x_std / (batch_idx + 1)
+    avg_x2_std = total_x2_std / (batch_idx + 1)
+
+    # current_lr = optimizer.param_groups[0]['lr']
 
     total_norm = 0
     for p in model.encoder_x_q.parameters():
@@ -145,19 +149,17 @@ def train(model, dataloader, x_queue, x2_queue, optimizer, device, config, crite
 
     # Update progress bar with detailed info
     pbar.set_postfix({
-      'loss': f'{final_loss.item():.4f}',
-      'avg': f'{avg_loss:.4f}',
-      'lr': f'{current_lr:.2e}',
-      'grad_norm': f'{total_norm**0.5}',
-      'transcription_std': f'{q_std[0]}',
-      'visual/audio_std': f'{q_std[1]}',
+      'avg loss': f'{avg_loss:.4f}',
+      'grad norm': f'{total_norm**0.5:.4f}',
+      'x std': f'{avg_x_std:.4f}',
+      'x2 std': f'{avg_x2_std:.4f}',
       'batch': f'{batch_idx+1}/{num_batches}'
     })
 
   if warmup:
-    return 0.0
+    return 0.0, 0.0, 0.0
   else:
-    return avg_loss
+    return avg_loss, avg_x_std, avg_x2_std
 """
 def validation_knn(model, train_loader, val_loader, device, criterion, lmbda, k=5, batch_size=256):
   model.encoder_k.eval()
@@ -247,6 +249,8 @@ def main():
   history = {
     'epoch':[],
     'train_loss':[],
+    'train_x_std':[],
+    'train_x2_std':[]
     # 'train_correct':[],
     # 'val_accuracy':[]
   }
@@ -364,15 +368,40 @@ def main():
     if warmup:
       logger.info(f"\n[Warm-up Epoch {epoch}/{opt.warmup_epochs}] Filling queue only...")
     if opt.is_sample:
-      train_avg_loss = train(model=model, dataloader=train_loader, x_queue=queue_x, x2_queue=queue_x2, optimizer=optimizer, device=device, config=config, criterion=criterion, lmbda=config['training']['lambda'], warmup=warmup, temperature=config['training']['T'], is_sample=True)
+      _, _, _ =\
+        train(model=model,
+              dataloader=train_loader,
+              x_queue=queue_x,
+              x2_queue=queue_x2,
+              optimizer=optimizer,
+              device=device,
+              config=config,
+              criterion=criterion,
+              lmbda=config['training']['lambda'],
+              warmup=warmup,
+              temperature=config['training']['T'],
+              is_sample=True)
     else:
-      train_avg_loss = train(model=model, dataloader=train_loader, x_queue=queue_x, x2_queue=queue_x2, optimizer=optimizer, device=device, config=config, criterion=criterion, lmbda=config['training']['lambda'], warmup=warmup, temperature=config['training']['T'])
+      train_avg_loss, train_avg_x_std, train_avg_x2_std =\
+        train(model=model,
+              dataloader=train_loader,
+              x_queue=queue_x,
+              x2_queue=queue_x2,
+              optimizer=optimizer,
+              device=device,
+              config=config,
+              criterion=criterion,
+              lmbda=config['training']['lambda'],
+              warmup=warmup,
+              temperature=config['training']['T'])  
     if warmup:
       continue
     # val_accuracy = validation_knn(model=model, train_loader=train_loader, val_loader=val_loader, device=device, lmbda=config['training']['lambda'], temperature=config['training']['T'])
 
     history['epoch'].append(epoch)
     history['train_loss'].append(train_avg_loss)
+    history['train_x_std'].append(train_avg_x_std)
+    history['train_x2_std'].append(train_avg_x2_std)
     # history['train_correct'].append(total_correct_rate)
     # history['val_accuracy'].append(val_accuracy)
 
@@ -390,9 +419,10 @@ def main():
         'history': history
     }
 
-    checkpoint_path = os.path.join(CHECKPOINTS_DIR, f"checkpoint_epoch{epoch}.pth")
-    torch.save(checkpoint, checkpoint_path)
-    logger.info(f"Checkpoint saved: {checkpoint_path}")
+    if epoch % 5 == 0:
+      checkpoint_path = os.path.join(CHECKPOINTS_DIR, f"checkpoint_epoch{epoch}.pth")
+      torch.save(checkpoint, checkpoint_path)
+      logger.info(f"Checkpoint saved: {checkpoint_path}")
 
     if len(history['train_loss']) > 0 and train_avg_loss <= min(history['train_loss']):
       best_path = os.path.join(CHECKPOINTS_DIR, f"best_model.pth")
@@ -418,12 +448,30 @@ def main():
   epochs_range = range(starting_epoch, starting_epoch + len(history['train_loss']))
 
   # Loss 그래프
-  plt.figure(figsize=(12, 5))
+  plt.figure(figsize=(18, 5))
   plt.subplot(1, 1, 1)
   plt.plot(epochs_range, history['train_loss'], 'b-', label='Train Loss')
   plt.xlabel('Epoch')
   plt.ylabel('Loss')
   plt.title('Training Loss')
+  plt.legend()
+  plt.grid(True)
+
+  # X_std 그래프
+  plt.subplot(1, 2, 2)
+  plt.plot(epochs_range, history['train_x_std'], 'b-', label='Train X Standard Deviation')
+  plt.xlabel('Epoch')
+  plt.ylabel('Std')
+  plt.title('Training X Std')
+  plt.legend()
+  plt.grid(True)
+
+  # X2_std 그래프
+  plt.subplot(1, 3, 3)
+  plt.plot(epochs_range, history['train_x2_std'], 'b-', label='Train X2 Standard Deviation')
+  plt.xlabel('Epoch')
+  plt.ylabel('Std')
+  plt.title('Training X2 Std')
   plt.legend()
   plt.grid(True)
 
