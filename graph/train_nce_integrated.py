@@ -217,7 +217,7 @@ def main():
   train_counters = Counter(label.y.item() for label in train_graphs)
   logger.info(train_counters)
 
-  class_weights = train_counters[0] / train_counters[1] * 0.7
+  class_weights = train_counters[0] / train_counters[1]
   logger.info(f"Weights: {class_weights}")
 
   logger.info("__VALIDATION_STATS__")
