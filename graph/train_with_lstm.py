@@ -1,5 +1,6 @@
 import torch, sys, os, path_config, argparse, yaml
 import pandas as pd
+import matplotlib.pyplot as plt
 from tqdm import tqdm
 from loguru import logger
 from torch.optim import lr_scheduler
@@ -7,9 +8,15 @@ from torch_geometric.loader import DataLoader
 from sklearn.metrics import f1_score
 from collections import Counter
 import torch.nn.functional as F
+from torch.cuda.amp import autocast, GradScaler
 
-from GAT_nce_integrated import GATClassifier
-from dataset_nce_integrated import make_graph
+from GAT_with_lstm import GATClassifier
+from dataset_with_lstm import make_graph
+
+
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning) 
+warnings.filterwarnings("ignore", category=FutureWarning)
 
 logger.remove()
 logger.add(
@@ -26,25 +33,26 @@ class FocalLoss(torch.nn.Module):
     self.reduction = reduction
 
   def forward(self, inputs, targets):
-    # BCEWithLogitsLoss와 동일하게 logits을 입력으로 받음
     bce_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction='none')
     pt = torch.exp(-bce_loss)
-    # Target이 1이면 alpha, 0이면 (1-alpha)를 적용
+    
     if self.alpha is not None:
-      alpha_t = self.alpha * targets + (1 - self.alpha) * (1 - targets)
-      f_loss = alpha_t * (1-pt)**self.gamma * bce_loss
+        alpha_t = self.alpha * targets + (1 - self.alpha) * (1 - targets)
+        f_loss = alpha_t * (1-pt)**self.gamma * bce_loss
     else:
-      f_loss = (1-pt)**self.gamma * bce_loss
+        f_loss = (1-pt)**self.gamma * bce_loss
     
     if self.reduction == 'mean':
       return torch.mean(f_loss)
     return f_loss
-
+  
 def train_gat(train_loader, model, criterion, optimizer, device, num_classes=2):  
   model.train()
   total_loss = 0
   all_preds = []
   all_labels = []
+
+  scaler = GradScaler()
 
   pbar = tqdm(train_loader, desc='Training', ncols=120)
   
@@ -52,20 +60,23 @@ def train_gat(train_loader, model, criterion, optimizer, device, num_classes=2):
     batch = batch.to(device)
     optimizer.zero_grad()
     
-    out = model(batch)
-    
-    if num_classes == 2:
-      # Binary classification
-      loss = criterion(out, batch.y.float())
-      pred = (torch.sigmoid(out) > 0.5).long()
-    else:
-      # Multi-class classification
-      loss = criterion(out, batch.y)
-      pred = out.argmax(dim=1)
-    
-    loss.backward()
-    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+    with autocast():
+      out = model(batch)
+      if num_classes == 2:
+        # Binary classification
+        loss = criterion(out, batch.y.float())
+        pred = (torch.sigmoid(out) > 0.5).long()
+      else:
+        # Multi-class classification
+        loss = criterion(out, batch.y)
+        pred = out.argmax(dim=1)
 
+    scaler.scale(loss).backward()
+    scaler.unscale_(optimizer)
+    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+    scaler.step(optimizer)
+    scaler.update()
+    
     total_norm = 0.0
     has_nan = False
     zero_grad_cnt = 0
@@ -92,8 +103,6 @@ def train_gat(train_loader, model, criterion, optimizer, device, num_classes=2):
     if has_nan:
       logger.error(f"Batch {idx}: Gradient Exploded (NaN detected)!")
 
-    optimizer.step()
-    
     total_loss += loss.item()
     all_preds.extend(pred.cpu().numpy())
     all_labels.extend(batch.y.cpu().numpy())
@@ -169,13 +178,9 @@ def main():
                       help="Exact directory path to save model")
   parser.add_argument('--patience', type=int, default=10, 
                       help="How many epochs wait before stopping for validation loss not improving.")
-  parser.add_argument('--base_path', type=str, default=None, metavar='PATH',
-                      help="Base model path (after root directory)")
   
   opt = parser.parse_args()
   logger.info(opt)
-
-  assert opt.base_path is not None, logger.error("No path for base model")
 
   with open(opt.config, 'r', encoding="utf-8") as ymlfile:
     config = yaml.safe_load(ymlfile)
@@ -183,11 +188,6 @@ def main():
   os.makedirs(opt.save_dir, exist_ok=True)
   CHECKPOINTS_DIR = os.path.join(opt.save_dir, opt.save_dir_)
   os.makedirs(CHECKPOINTS_DIR, exist_ok=True)
-
-  BASEMODEL_DIR = os.path.join(path_config.ROOT_DIR, opt.base_path)
-  if not os.path.exists(BASEMODEL_DIR):
-    logger.error("Wrong Base Model Path: path does not exists")
-    return
 
   history = {
     'epoch':[],
@@ -211,17 +211,9 @@ def main():
   test_label = test_df.PHQ_Binary.tolist()
 
   logger.info("Processing Train Data")
-  train_graphs = make_graph(
-    train_id + val_id, 
-    train_label + val_label, 
-    base_model_path=BASEMODEL_DIR
-  )
+  train_graphs, v_dim, a_dim, _ = make_graph(train_id+val_id, train_label+val_label, model_name=config['training']['embed_model'])
   logger.info("Processing Validation Data")
-  val_graphs = make_graph(
-    test_id, 
-    test_label, 
-    base_model_path=BASEMODEL_DIR
-  )
+  val_graphs, _, _, _ = make_graph(test_id, test_label, model_name=config['training']['embed_model'])
 
   logger.info("__TRAINING_STATS__")
   train_counters = Counter(label.y.item() for label in train_graphs)
@@ -234,27 +226,41 @@ def main():
   val_counters = Counter(label.y.item() for label in val_graphs)
   logger.info(val_counters)
 
+  dropout_dict = {
+    'text_dropout':config['model']['t_dropout'],
+    'graph_dropout':config['model']['g_dropout'],
+    'vision_dropout':config['model']['v_dropout'],
+    'audio_dropout':config['model']['a_dropout']
+  }
+
   logger.info("Setting Training Environment")
   device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
   model = GATClassifier(
-    in_channels=train_graphs[0].x.shape[1],
-    hidden_channels=config['model']['h_dim'],
-    num_classes=2,
-    heads=config['model']['head'],
-    dropout=config['model']['dropout']
+      text_dim=train_graphs[0].x.shape[1],
+      vision_dim=v_dim,
+      audio_dim=a_dim,
+      hidden_channels=config['model']['h_dim'],
+      num_classes=2,
+      dropout_dict=dropout_dict,
+      heads=config['model']['head'],
+      use_cross_modal=config['model']['use_cross_modal']
   ).to(device)
   logger.info(f"Model initialized with:")
-  logger.info(f"  - Input dim: {train_graphs[0].x.shape[1]}")
+  logger.info(f"  - Text dim: {train_graphs[0].x.shape[1]}")
+  logger.info(f"  - Vision dim: {v_dim}")
+  logger.info(f"  - Audio dim: {a_dim}")
   logger.info(f"  - Hidden channels: {config['model']['h_dim']}")
   
-  optimizer = torch.optim.AdamW(model.parameters(), lr=config['training']['lr'], weight_decay=config['training']['weight-decay'])
+  optimizer = torch.optim.Adam(model.parameters(), lr=config['training']['lr'], weight_decay=config['training']['weight-decay'])
   if config['training']['scheduler'] == 'steplr':
     scheduler = lr_scheduler.StepLR(optimizer, step_size=config['training']['step-size'], gamma=config['training']['gamma'])
-  else:
+  elif config['training']['scheduler'] == 'cosinelr':
     scheduler = lr_scheduler.CosineAnnealingLR(optimizer, T_max=opt.num_epochs)
+  elif config['training']['scheduler'] == 'reducelr':
+    scheduler = lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=5)
 
   # criterion = torch.nn.BCEWithLogitsLoss(pos_weight=torch.tensor([class_weights]).to(device))
-  criterion = FocalLoss(alpha=0.7, gamma=2.0).to(device)
+  criterion = FocalLoss(alpha=0.75, gamma=3.0).to(device)
   logger.info("Environment Ready")
   logger.info("Providing Loader")
   train_loader = DataLoader(train_graphs, batch_size=config['training']['bs'], shuffle=True)
@@ -288,7 +294,7 @@ def main():
     logger.info("No checkpoint loaded. Starting from scratch.")
 
   logger.info("Training Start")
-  for epoch in range(starting_epoch, opt.num_epochs + 1):
+  for epoch in range(starting_epoch, starting_epoch + opt.num_epochs + 1):
     train_loss, train_acc, train_f1 = train_gat(
       train_loader=train_loader,
       model=model,
@@ -297,13 +303,17 @@ def main():
       device=device,
       num_classes=2)
     
+    torch.cuda.empty_cache()
+    
     val_acc, val_f1 = validation_gat(
       val_loader=val_loader,
       model=model,
       device=device,
       num_classes=2)
     
-    if scheduler is not None:
+    if isinstance(scheduler, lr_scheduler.ReduceLROnPlateau):
+      scheduler.step(float(val_f1))
+    else:
       scheduler.step()
     current_lr = optimizer.param_groups[0]['lr']
     
@@ -320,6 +330,17 @@ def main():
       f"Val Acc={val_acc:.4f}, Val F1={val_f1:.4f} | "
       f"LR={current_lr:.6f}"
     )
+    if hasattr(model.vision_lstm, 'bilstm') and model.vision_lstm.bilstm.weight_ih_l0.grad is not None:
+      v_grad_norm = model.vision_lstm.bilstm.weight_ih_l0.grad.norm().item() # type: ignore
+      logger.info(f"Vision LSTM Grad: {v_grad_norm:.4f}")
+    else:
+        logger.info("Vision LSTM Grad: None")
+
+    if hasattr(model.audio_lstm, 'bilstm') and model.audio_lstm.bilstm.weight_ih_l0.grad is not None:
+      a_grad_norm = model.audio_lstm.bilstm.weight_ih_l0.grad.norm().item() # type: ignore
+      logger.info(f"Audio LSTM Grad:  {a_grad_norm:.4f}")
+    else:
+      logger.info("Audio LSTM Grad: None")
 
     checkpoint = {
       'epoch': epoch,
@@ -358,12 +379,66 @@ def main():
   history_df.to_csv(history_path, index=False)
   logger.info(f"Training history saved to {history_path}")
 
+  # 학습 완료 후 그래프 생성
+  logger.info("\nGenerating training history plots...")
+
+  # 디렉토리 생성
+  plots_dir = os.path.join(CHECKPOINTS_DIR, "plots")
+  if not os.path.exists(plots_dir):
+    os.makedirs(plots_dir)
+
+  epochs_range = range(starting_epoch, starting_epoch + len(history['train_loss']))
+
+  fig, axes = plt.subplots(2, 2, figsize=(18, 5))
+
+  # 1. Loss 그래프 (첫 번째 칸: axes[0,0])
+  axes[0,0].plot(epochs_range, history['train_loss'], 'b-', label='Train Loss')
+  axes[0,0].set_xlabel('Epoch')
+  axes[0,0].set_ylabel('Loss')
+  axes[0,0].set_title('Training Loss')
+  axes[0,0].legend()
+  axes[0,0].grid(True)
+
+  # 2. Train_F1 그래프 (첫 번째 칸: axes[0,1])
+  axes[0,1].plot(epochs_range, history['train_f1'], 'b-', label='Train F1')
+  axes[0,1].set_xlabel('Epoch')
+  axes[0,1].set_ylabel('F1')
+  axes[0,1].set_title('Train F1-score')
+  axes[0,1].legend()
+  axes[0,1].grid(True)
+
+  # 3. X_std 그래프 (두 번째 칸: axes[1,0])
+  axes[1,0].plot(epochs_range, history['val_acc'], 'g-', label='Val Acc') # 색상 구분(green)
+  axes[1,0].set_xlabel('Epoch')
+  axes[1,0].set_ylabel('Acc')
+  axes[1,0].set_title('Validation Accuracy')
+  axes[1,0].legend()
+  axes[1,0].grid(True)
+
+  # 4. X2_std 그래프 (세 번째 칸: axes[1,1])
+  axes[1,1].plot(epochs_range, history['val_f1'], 'r-', label='Val F1') # 색상 구분(red)
+  axes[1,1].set_xlabel('Epoch')
+  axes[1,1].set_ylabel('F1')
+  axes[1,1].set_title('Validation F1-score')
+  axes[1,1].legend()
+  axes[1,1].grid(True)
+
+  plt.tight_layout()
+  
+  # 이미지 저장
+  plot_path = os.path.join(plots_dir, 'training_history.png')
+  plt.savefig(plot_path, dpi=300)
+
+  plt.close(fig) 
+  
+  logger.info(f"Plot saved: {plot_path}")
+
 if __name__=="__main__":
   main()
 
 # first
-#   ex) python graph/train_nce_integrated.py --base_path checkpoints_nce/multimodal_nce_9(memory_eff_1)/best_model.pth --num_epochs 300 --patience 100
-#     -> epochs: 300, workers: 2, config_file: graph/configs/architecture.yaml, save_path: checkpoints/checkpoints1, patience: 100
+#   ex) python graph/train_with_lstm.py --save_dir checkpoints_graph3 --save_dir_ LSTM_graph_11(focal) --num_epochs 150 --patience 30
+#     -> epochs: 150, config_file: graph/configs/architecture.yaml, save_path: checkpoints_graph3/LSTM_graph_11(focal), patience: 30
 # resume
 #   ex) python graph/train.py --resume checkpoints/checkpoints1/best_model.pth
 

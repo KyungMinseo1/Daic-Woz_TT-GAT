@@ -9,6 +9,7 @@ import torch
 import torch.nn.utils.rnn as rnn_utils
 from torch_geometric.data import Data
 from torch_geometric.utils import to_networkx
+from torch_geometric.transforms import ToUndirected
 
 from lstm_nce_multimodal import NCEMultimodalModel
 from gensim.models import KeyedVectors
@@ -76,14 +77,13 @@ def process_vision(df):
   vision = pd.concat([timestamp, ft_x, ft_y, au_r, gz_h, ps_t, ps_r], axis=1)
   return vision
 
-def make_graph(ids, labels, checkpoints_dir, checkpoints_dir_):
+def make_graph(ids, labels, base_model_path):
   try:
     logger.info("Loading GloVe Model...")
     glove_model = KeyedVectors.load(os.path.join(path_config.MODEL_DIR, 'glove_model.kv'))
     
     logger.info("Loading NCE Model...")
-    checkpoint_path = os.path.join(checkpoints_dir, checkpoints_dir_, 'best_model.pth')
-    checkpoint = torch.load(checkpoint_path)
+    checkpoint = torch.load(base_model_path)
     
     best_nce_model = NCEMultimodalModel(
       x_input_dim=300,   # glove dim
@@ -165,8 +165,8 @@ def make_graph(ids, labels, checkpoints_dir, checkpoints_dir_):
         x2_lens = torch.tensor([len(seq) for seq in batch_vision_seqs])
         
         with torch.no_grad():
-          t_feat, _ = lstm_transcription(padded_x, x_lens)   # Text Nodes
-          v_feat, _ = lstm_vision(padded_x2, x2_lens)      # Vision Nodes
+          _, t_feat = lstm_transcription(padded_x, x_lens)   # Text Nodes
+          _, v_feat = lstm_vision(padded_x2, x2_lens)      # Vision Nodes
         
         t_feat = t_feat.cpu()
         v_feat = v_feat.cpu()
@@ -184,19 +184,20 @@ def make_graph(ids, labels, checkpoints_dir, checkpoints_dir_):
             
         topic_features = torch.stack(topic_features) # (Num_Topics, Feature_Dim)
 
-        summary_node = torch.mean(topic_features, dim=0, keepdim=True)
+        # summary_node = torch.mean(topic_features, dim=0, keepdim=True)
 
-        x = torch.cat([summary_node, topic_features, t_feat, v_feat], dim=0)
+        # x = torch.cat([summary_node, topic_features, t_feat, v_feat], dim=0)
+        x = torch.cat([topic_features, t_feat, v_feat], dim=0)
 
         # Edge Construction
         num_topics = len(unique_topics_ordered)
         num_groups = len(t_feat)
         
         # Indices Offsets
-        summary_idx = 0
-        topic_start = 1
-        text_start = 1 + num_topics
-        vision_start = 1 + num_topics + num_groups
+        # summary_idx = 0
+        topic_start = 0
+        text_start = 0 + num_topics
+        vision_start = 0 + num_topics + num_groups
 
         src_nodes = []
         dst_nodes = []
@@ -229,21 +230,27 @@ def make_graph(ids, labels, checkpoints_dir, checkpoints_dir_):
           src_nodes.append(curr_topic); dst_nodes.append(next_topic)
           src_nodes.append(next_topic); dst_nodes.append(curr_topic)
 
+        """
         # Topic -> Summary
         for i in range(num_topics):
           curr_topic = topic_start + i
           src_nodes.append(curr_topic); dst_nodes.append(summary_idx)
+        """
 
         edge_index = torch.tensor([src_nodes, dst_nodes], dtype=torch.long)
         y = torch.tensor([label], dtype=torch.long)
+
+        # Topic 노드 개수만큼 True, 나머지는 False
+        topic_mask = torch.zeros(x.size(0), dtype=torch.bool)
+        topic_mask[:num_topics] = True
         
         # Node Types List
-        node_types = ['summary'] + \
-                     ['topic'] * num_topics + \
+        node_types = ['topic'] * num_topics + \
                      ['text'] * num_groups + \
                      ['vision'] * num_groups
         
-        data = Data(x=x, edge_index=edge_index, y=y, node_types=node_types)
+        data = Data(x=x, edge_index=edge_index, y=y, node_types=node_types, topic_mask=topic_mask)
+        data = ToUndirected()(data)
         graphs.append(data)
 
       except Exception as e:
@@ -257,6 +264,9 @@ def make_graph(ids, labels, checkpoints_dir, checkpoints_dir_):
     return []
 
 if __name__=="__main__":
+  BASEMODEL_DIR = os.path.join(path_config.ROOT_DIR, "checkpoints_nce/multimodal_nce_9(memory_eff_1)/best_model.pth")
+  assert os.path.exists(BASEMODEL_DIR), logger.error("Wrong Base Model Path: path does not exists")
+
   train_df = pd.read_csv(os.path.join(path_config.DATA_DIR, 'train_split_Depression_AVEC2017.csv'))
   
   logger.info(f"Sampling Dataframes (n=8)")
@@ -268,8 +278,7 @@ if __name__=="__main__":
   train_graphs, v_dim = make_graph(
     train_id, 
     train_label, 
-    checkpoints_dir='checkpoints_nce', 
-    checkpoints_dir_='multimodal_nce_4'
+    base_model_path=BASEMODEL_DIR
   )
   
   if len(train_graphs) > 0:
@@ -309,7 +318,6 @@ if __name__=="__main__":
     nx.draw_networkx_edges(G, pos, edge_color='gray', arrows=True, arrowstyle='->', arrowsize=8, alpha=0.4)
     
     legend_elements = [
-        mpatches.Patch(color=color_map['summary'], label='Summary'),
         mpatches.Patch(color=color_map['topic'], label='Topic'),
         mpatches.Patch(color=color_map['text'], label='Text'),
         mpatches.Patch(color=color_map['vision'], label='Vision')
