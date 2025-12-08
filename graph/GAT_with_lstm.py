@@ -59,10 +59,37 @@ class AttentionBiLSTM(nn.Module):
     def __init__(self, input_dim:int, hidden_dim:int, output_dim:int, num_layers:int=2, dropout:float=0.3):
         super().__init__()
         self.bilstm = nn.LSTM(input_dim, hidden_dim, num_layers=num_layers, batch_first=True, bidirectional=True, dropout=dropout if num_layers>1 else 0.0)
-        # self.attention = Attention(hidden_dim * 2)
-        self.multihead_attn = nn.MultiheadAttention(hidden_dim * 2, num_heads=4, dropout=dropout, batch_first=True)
+        self.attention = Attention(hidden_dim * 2)
+        # self.multihead_attn = nn.MultiheadAttention(hidden_dim * 2, num_heads=4, dropout=dropout, batch_first=True)
         self.dropout = nn.Dropout(dropout)
         self.fc = nn.Linear(hidden_dim*2, output_dim)
+
+        self._init_weights()
+
+    def _init_weights(self):
+        """LSTM, Linear 초기화"""
+        for name, param in self.bilstm.named_parameters():
+            if 'weight_ih' in name:
+                # Input-Hidden: Xavier Uniform
+                nn.init.xavier_uniform_(param.data)
+            elif 'weight_hh' in name:
+                # Hidden-Hidden: Orthogonal
+                nn.init.orthogonal_(param.data)
+            elif 'bias' in name:
+                # Bias: 0
+                nn.init.zeros_(param.data)
+                # param.data[self.bilstm.hidden_size:2*self.bilstm.hidden_size] = 1.0
+
+        # Attention 초기화
+        for m in self.attention.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+
+        nn.init.xavier_uniform_(self.fc.weight) 
+        # nn.init.normal_(self.fc.weight, mean=0, std=0.01) 
+        nn.init.zeros_(self.fc.bias)
 
     def forward(self, x, lengths):
         """
@@ -77,17 +104,63 @@ class AttentionBiLSTM(nn.Module):
         # output shape: (B, seq_len, hidden*2)
         lstm_output, _ = pad_packed_sequence(packed_out, batch_first=True)
 
-        # context_vector = self.attention(lstm_output)
-        attn_output, attn_weights = self.multihead_attn(lstm_output, lstm_output, lstm_output)
-        context_vector = attn_output.mean(dim=1)
+        context_vector = self.attention(lstm_output)
+        # attn_output, attn_weights = self.multihead_attn(lstm_output, lstm_output, lstm_output)
+        # context_vector = attn_output.mean(dim=1)
 
         # Attention
         out = self.dropout(context_vector)
         logits = self.fc(out)
         return logits, context_vector
 
+class SimpleBiLSTM(nn.Module):
+    def __init__(self, input_dim:int, hidden_dim:int, output_dim:int, num_layers:int=2, dropout:float=0.3):
+        super().__init__()
+        self.bilstm = nn.LSTM(input_dim, hidden_dim, num_layers=num_layers, batch_first=True, bidirectional=True, dropout=dropout if num_layers>1 else 0.0)
+        self.dropout = nn.Dropout(dropout)
+        self.fc = nn.Linear(hidden_dim*2, output_dim)
+
+        self._init_weights()
+
+    def _init_weights(self):
+        """LSTM, Linear 초기화"""
+        for name, param in self.bilstm.named_parameters():
+            if 'weight_ih' in name:
+                # Input-Hidden: Xavier Uniform
+                nn.init.xavier_uniform_(param.data)
+            elif 'weight_hh' in name:
+                # Hidden-Hidden: Orthogonal
+                nn.init.orthogonal_(param.data)
+            elif 'bias' in name:
+                # Bias: 0
+                nn.init.zeros_(param.data)
+                # param.data[self.bilstm.hidden_size:2*self.bilstm.hidden_size] = 1.0
+
+    def forward(self, x, lengths):
+        """
+        Args:
+        x: (batch, seq_len, input_dim) - already feature vectors
+        lengths: (batch,) - sequence lengths
+        """
+        self.bilstm.flatten_parameters()
+        packed = pack_padded_sequence(x, lengths.cpu(), batch_first=True, enforce_sorted=False)
+        packed_out, (h_n, c_n) = self.bilstm(packed)
+
+        if self.bilstm.bidirectional:
+            # take the last layer's forward and backward
+            # forward hidden is h_n[-2], backward hidden is h_n[-1]
+            h_forward = h_n[-2]
+            h_backward = h_n[-1]
+            h_final = torch.cat((h_forward, h_backward), dim=1) # (batch, hidden_dim*2)
+        else:
+            h_final = h_n[-1]
+
+        out = self.dropout(h_final)
+        logits = self.fc(out)
+        return logits, h_final
+
 class GATClassifier(nn.Module):
-    def __init__(self, text_dim, vision_dim, audio_dim, hidden_channels, num_classes, dropout_dict, heads=8, use_cross_modal=False):
+    def __init__(self, text_dim, vision_dim, audio_dim, hidden_channels, num_classes, dropout_dict, heads=8, use_attention=False, use_cross_modal=False):
         """
         Args:
             text_dim: 텍스트 임베딩 차원 (summary, topic, transcription)
@@ -105,29 +178,49 @@ class GATClassifier(nn.Module):
         self.dropout_v = dropout_dict.get('vision_dropout', 0.1)
         self.dropout_a = dropout_dict.get('audio_dropout', 0.1)
         self.num_classes = num_classes
+        self.use_attention = use_attention
         self.use_cross_modal = use_cross_modal
 
         self.norm1 = nn.LayerNorm(hidden_channels * heads)
         self.norm2 = nn.LayerNorm(hidden_channels * heads)
-        self.norm3 = nn.LayerNorm(hidden_channels)
+        self.norm3 = nn.LayerNorm(hidden_channels * heads)
+        self.norm4 = nn.LayerNorm(hidden_channels)
 
         # Vision LSTM
-        self.vision_lstm = AttentionBiLSTM(
-            input_dim=vision_dim, 
-            hidden_dim=hidden_channels,
-            output_dim=hidden_channels,
-            num_layers=2,
-            dropout=self.dropout_v
-        )
+        if self.use_attention:
+            self.vision_lstm = AttentionBiLSTM(
+                input_dim=vision_dim, 
+                hidden_dim=hidden_channels,
+                output_dim=hidden_channels,
+                num_layers=2,
+                dropout=self.dropout_v
+            )
+        else:
+            self.vision_lstm = SimpleBiLSTM(
+                input_dim=vision_dim,
+                hidden_dim=hidden_channels,
+                output_dim=hidden_channels,
+                num_layers=2,
+                dropout=self.dropout_v
+            )
 
         # Audio LSTM
-        self.audio_lstm = AttentionBiLSTM(
-            input_dim=audio_dim, 
-            hidden_dim=hidden_channels,
-            output_dim=hidden_channels,
-            num_layers=2,
-            dropout=self.dropout_a
-        )
+        if self.use_attention:
+            self.audio_lstm = AttentionBiLSTM(
+                input_dim=audio_dim, 
+                hidden_dim=hidden_channels,
+                output_dim=hidden_channels,
+                num_layers=2,
+                dropout=self.dropout_a
+            )
+        else:
+            self.audio_lstm = SimpleBiLSTM(
+                input_dim=audio_dim,
+                hidden_dim=hidden_channels,
+                output_dim=hidden_channels,
+                num_layers=2,
+                dropout=self.dropout_a
+            )
 
         self.text_proj = nn.Linear(text_dim, hidden_channels)
         self.dropout_text = nn.Dropout(self.dropout_t)
@@ -141,10 +234,44 @@ class GATClassifier(nn.Module):
 
         self.conv1 = GATv2Conv(hidden_channels, hidden_channels, heads=heads, dropout=self.dropout_g, add_self_loops=True)
         self.conv2 = GATv2Conv(hidden_channels * heads, hidden_channels, heads=heads, dropout=self.dropout_g, add_self_loops=True)
-        self.conv3 = GATv2Conv(hidden_channels * heads, hidden_channels, heads=1, concat=False, dropout=self.dropout_g, add_self_loops=True)
+        self.conv3 = GATv2Conv(hidden_channels * heads, hidden_channels, heads=heads, dropout=self.dropout_g, add_self_loops=True)
+        self.conv4 = GATv2Conv(hidden_channels * heads, hidden_channels, heads=1, concat=False, dropout=self.dropout_g, add_self_loops=True)
 
         out_dim = 1 if num_classes == 2 else num_classes
         self.lin = nn.Linear(hidden_channels, out_dim)
+
+        if self.use_attention and hasattr(self.vision_lstm, 'bilstm'):
+            self.vision_lstm.bilstm.flatten_parameters()
+            self.audio_lstm.bilstm.flatten_parameters()
+        elif hasattr(self.vision_lstm, 'bilstm'):
+             self.vision_lstm.bilstm.flatten_parameters()
+             self.audio_lstm.bilstm.flatten_parameters()
+
+        self._init_weights()
+
+    def _init_weights(self):
+        """GAT 초기화"""
+        
+        # Linear
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                # Xavier -> ELU/Relu
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.LayerNorm):
+                # LayerNorm -> weight=1, bias=0
+                nn.init.ones_(m.weight)
+                nn.init.zeros_(m.bias)
+
+        # GATv2Conv
+        self.conv1.reset_parameters()
+        self.conv2.reset_parameters()
+        self.conv3.reset_parameters()
+        
+        nn.init.xavier_uniform_(self.lin.weight, gain=0.01)
+        if self.lin.bias is not None:
+            nn.init.zeros_(self.lin.bias)
 
     def forward(self, data):
         """
@@ -156,8 +283,8 @@ class GATClassifier(nn.Module):
                 - data.node_types: 노드 타입 리스트 (len = num_nodes)
         """
         x, edge_index, batch = data.x, data.edge_index, data.batch
-        x_vision = data.x_vision    # (N_vision, seq_len, v_Dim)
-        x_audio = data.x_audio      # (N_audio, seq_len, a_Dim)
+        x_vision = data.x_vision    # (N_vision, seq_len, v_dim)
+        x_audio = data.x_audio      # (N_audio, seq_len, a_dim)
         node_types = data.node_types
         vision_lengths = data.vision_lengths
         audio_lengths = data.audio_lengths
@@ -225,11 +352,18 @@ class GATClassifier(nn.Module):
         x = self.conv2(x, edge_index)
         x = self.norm2(x + x_in)
         x = F.elu(x)
-        
+
         # GAT 레이어 3
+        x_in = x
         x = F.dropout(x, p=self.dropout_g, training=self.training)
         x = self.conv3(x, edge_index)
-        x = self.norm3(x)
+        x = self.norm3(x + x_in)
+        x = F.elu(x)
+        
+        # GAT 레이어 4
+        x = F.dropout(x, p=self.dropout_g, training=self.training)
+        x = self.conv4(x, edge_index)
+        x = self.norm4(x)
         
         # batch 벡터를 이용해 그래프별 평균 계산
         # graph_embeddings = global_mean_pool(x, batch) # [batch_size, hidden_channels]

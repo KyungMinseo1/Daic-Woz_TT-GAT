@@ -1,7 +1,7 @@
 training:
-  lr: 0.00001
-  weight-decay: 0.0005
-  bs: 8
+  lr: 0.00005
+  weight-decay: 0.001
+  bs: 4
   scheduler: 'reducelr'
   gamma: 0.5
   step-size: 50
@@ -10,8 +10,9 @@ training:
 model:
   h_dim: 256
   head: 8
-  t_dropout: 0.2
+  t_dropout: 0.3
   g_dropout: 0.3
-  v_dropout: 0.2
-  a_dropout: 0.2
-  use_cross_modal: False
+  v_dropout: 0.3
+  a_dropout: 0.3
+  use_attention: True
+  use_cross_modal: True

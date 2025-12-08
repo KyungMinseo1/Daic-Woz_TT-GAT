@@ -25,6 +25,20 @@ logger.add(
   format="<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | <level>{message}</level>",
 )
 
+def check_lstm_grad(lstm_module, name="LSTM"):
+  total_norm = 0.0
+  cnt = 0
+  for p_name, p in lstm_module.bilstm.named_parameters():
+    if p.grad is not None:
+      param_norm = p.grad.data.norm(2)
+      total_norm += param_norm.item() ** 2
+      cnt += 1
+  if cnt > 0:
+    total_norm = total_norm ** 0.5
+    logger.info(f"{name} Total Grad Norm: {total_norm:.4f}")
+  else:
+    logger.info(f"{name} Grad: None")
+
 class FocalLoss(torch.nn.Module):
   def __init__(self, alpha=0.25, gamma=2.0, reduction='mean'):
     super(FocalLoss, self).__init__()
@@ -52,30 +66,54 @@ def train_gat(train_loader, model, criterion, optimizer, device, num_classes=2):
   all_preds = []
   all_labels = []
 
-  scaler = GradScaler()
+  # scaler = GradScaler()
 
   pbar = tqdm(train_loader, desc='Training', ncols=120)
   
   for idx, batch in enumerate(pbar):
     batch = batch.to(device)
+
+    if torch.isnan(batch.x).any() or torch.isinf(batch.x).any():
+      logger.error(f"Batch {idx}: Input features (batch.x) contain NaN or Inf! Aborting batch.")
+      continue
+      
+    if torch.isnan(batch.x_vision).any() or torch.isinf(batch.x_vision).any():
+      logger.error(f"Batch {idx}: Input features (batch.x_vision) contain NaN or Inf! Aborting batch.")
+      continue
+      
+    if torch.isnan(batch.x_audio).any() or torch.isinf(batch.x_audio).any():
+      logger.error(f"Batch {idx}: Input features (batch.x_audio) contain NaN or Inf! Aborting batch.")
+      continue
+
     optimizer.zero_grad()
     
-    with autocast():
-      out = model(batch)
-      if num_classes == 2:
-        # Binary classification
-        loss = criterion(out, batch.y.float())
-        pred = (torch.sigmoid(out) > 0.5).long()
-      else:
-        # Multi-class classification
-        loss = criterion(out, batch.y)
-        pred = out.argmax(dim=1)
+    # with autocast():
+    out = model(batch)
+    if num_classes == 2:
+      # Binary classification
+      loss = criterion(out, batch.y.float())
+      pred = (torch.sigmoid(out) > 0.5).long()
+    else:
+      # Multi-class classification
+      loss = criterion(out, batch.y)
+      pred = out.argmax(dim=1)
 
-    scaler.scale(loss).backward()
-    scaler.unscale_(optimizer)
-    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
-    scaler.step(optimizer)
-    scaler.update()
+    loss.backward()
+
+    # logger.info("--- Gradient Check ---")
+    # for name, param in model.named_parameters():
+    #   if param.grad is not None:
+    #     grad_norm = param.grad.data.norm(2).item()
+    #     if grad_norm > 1.0: # 튀는 놈만 출력
+    #       logger.info(f"{name}: {grad_norm:.4f}")
+    # logger.info("----------------------\n")
+
+    # scaler.scale(loss).backward()
+    # scaler.unscale_(optimizer)
+    # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=3.0)
+    # scaler.step(optimizer)
+    # scaler.update()
+    optimizer.step()
     
     total_norm = 0.0
     has_nan = False
@@ -178,6 +216,8 @@ def main():
                       help="Exact directory path to save model")
   parser.add_argument('--patience', type=int, default=10, 
                       help="How many epochs wait before stopping for validation loss not improving.")
+  parser.add_argument('--sample_rate', type=float, default=1.0, 
+                      help="Sampling rate of Data.")
   
   opt = parser.parse_args()
   logger.info(opt)
@@ -201,6 +241,10 @@ def main():
   train_df = pd.read_csv(os.path.join(path_config.DATA_DIR, 'train_split_Depression_AVEC2017.csv'))
   val_df = pd.read_csv(os.path.join(path_config.DATA_DIR, 'dev_split_Depression_AVEC2017.csv'))
   test_df = pd.read_csv(os.path.join(path_config.DATA_DIR, 'full_test_split.csv'))
+
+  train_df = train_df.sample(frac=opt.sample_rate)
+  val_df = val_df.sample(frac=opt.sample_rate)
+  test_df = test_df.sample(frac=opt.sample_rate)
   
   train_id = train_df.Participant_ID.tolist()
   val_id = val_df.Participant_ID.tolist()
@@ -243,6 +287,7 @@ def main():
       num_classes=2,
       dropout_dict=dropout_dict,
       heads=config['model']['head'],
+      use_attention=config['model']['use_attention'],
       use_cross_modal=config['model']['use_cross_modal']
   ).to(device)
   logger.info(f"Model initialized with:")
@@ -259,8 +304,8 @@ def main():
   elif config['training']['scheduler'] == 'reducelr':
     scheduler = lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=5)
 
-  # criterion = torch.nn.BCEWithLogitsLoss(pos_weight=torch.tensor([class_weights]).to(device))
-  criterion = FocalLoss(alpha=0.75, gamma=3.0).to(device)
+  criterion = torch.nn.BCEWithLogitsLoss(pos_weight=torch.tensor([class_weights]).to(device))
+  # criterion = FocalLoss(alpha=0.75, gamma=3.0).to(device)
   logger.info("Environment Ready")
   logger.info("Providing Loader")
   train_loader = DataLoader(train_graphs, batch_size=config['training']['bs'], shuffle=True)
@@ -330,17 +375,21 @@ def main():
       f"Val Acc={val_acc:.4f}, Val F1={val_f1:.4f} | "
       f"LR={current_lr:.6f}"
     )
-    if hasattr(model.vision_lstm, 'bilstm') and model.vision_lstm.bilstm.weight_ih_l0.grad is not None:
-      v_grad_norm = model.vision_lstm.bilstm.weight_ih_l0.grad.norm().item() # type: ignore
-      logger.info(f"Vision LSTM Grad: {v_grad_norm:.4f}")
-    else:
-        logger.info("Vision LSTM Grad: None")
 
-    if hasattr(model.audio_lstm, 'bilstm') and model.audio_lstm.bilstm.weight_ih_l0.grad is not None:
-      a_grad_norm = model.audio_lstm.bilstm.weight_ih_l0.grad.norm().item() # type: ignore
-      logger.info(f"Audio LSTM Grad:  {a_grad_norm:.4f}")
-    else:
-      logger.info("Audio LSTM Grad: None")
+    # if hasattr(model.vision_lstm, 'bilstm') and model.vision_lstm.bilstm.weight_ih_l0.grad is not None:
+    #   v_grad_norm = model.vision_lstm.bilstm.weight_ih_l0.grad.norm().item() # type: ignore
+    #   logger.info(f"Vision LSTM Grad: {v_grad_norm:.4f}")
+    # else:
+    #     logger.info("Vision LSTM Grad: None")
+
+    # if hasattr(model.audio_lstm, 'bilstm') and model.audio_lstm.bilstm.weight_ih_l0.grad is not None:
+    #   a_grad_norm = model.audio_lstm.bilstm.weight_ih_l0.grad.norm().item() # type: ignore
+    #   logger.info(f"Audio LSTM Grad:  {a_grad_norm:.4f}")
+    # else:
+    #  logger.info("Audio LSTM Grad: None")
+
+    check_lstm_grad(model.vision_lstm, "Vision LSTM")
+    check_lstm_grad(model.audio_lstm, "Audio LSTM")
 
     checkpoint = {
       'epoch': epoch,

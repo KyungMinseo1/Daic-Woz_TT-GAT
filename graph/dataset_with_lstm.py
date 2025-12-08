@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 from torch_geometric.utils import to_networkx
 import matplotlib.patches as mpatches
 import networkx as nx
-from torch_geometric.transforms import ToUndirected
+from sklearn.preprocessing import StandardScaler
 
 plt.rcParams['font.family'] ='Malgun Gothic'
 plt.rcParams['axes.unicode_minus'] =False
@@ -70,6 +70,9 @@ def make_graph(ids, labels, model_name):
     logger.info("Switching CSV into Graphs")
     graphs = []
     dict_list = []
+
+    v_scaler = StandardScaler()
+    a_scaler = StandardScaler()
     
     for graph_idx, (df, v_df, a_df) in tqdm(enumerate(dataframes), desc="Dataframe -> Graph", total=len(dataframes)):
       try:
@@ -90,10 +93,11 @@ def make_graph(ids, labels, model_name):
 
         # Vision Scaling
         vision = process_vision(v_df)
-        vision = vision.fillna(0)        
+        vision = vision.replace([np.inf, -np.inf], np.nan).fillna(0)      
         vision_timestamps = vision['timestamp'].values
         vision_df = vision.drop(columns=['timestamp'])
-
+        vision_scaled = v_scaler.fit_transform(vision_df.values)
+        vision_df = pd.DataFrame(vision_scaled, columns=vision_df.columns)
         vision_df['timestamp'] = vision_timestamps
 
         # Audio Scaling
@@ -101,6 +105,9 @@ def make_graph(ids, labels, model_name):
         if audio_df.shape[1] == 0:
           logger.warning("No audio features found! Adding a dummy feature.")
           audio_df['dummy_audio'] = 0.0
+        elif audio_df.shape[1] > 0:
+          audio_values = a_scaler.fit_transform(audio_df.values)
+          audio_df = pd.DataFrame(audio_values, columns=audio_df.columns)
 
         previous_index = None
         previous_topic = None
@@ -379,6 +386,7 @@ if __name__=="__main__":
           'audio_dropout': 0.4
       },
       heads=8,
+      use_attention=False,
       use_cross_modal=False
   ).to(device)
   logger.info("Loader/Model Ready")
@@ -393,6 +401,7 @@ if __name__=="__main__":
         out = model(batch)
       logger.info("Done Testing -> Ready to train.")
     except Exception as e:
+      import traceback; traceback.print_exc()
       logger.error(e)
       logger.error("Error in Testing -> need to fix")
 
