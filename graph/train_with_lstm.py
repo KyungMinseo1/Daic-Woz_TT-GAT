@@ -218,11 +218,13 @@ def main():
                       help="How many epochs wait before stopping for validation loss not improving.")
   parser.add_argument('--sample_rate', type=float, default=1.0, 
                       help="Sampling rate of Data.")
+  parser.add_argument('--colab_path', type=str, default=None, 
+                      help="Write the path of temporary directory when using colab. (Transcription/Vision/Audio)")
   
   opt = parser.parse_args()
   logger.info(opt)
 
-  with open(opt.config, 'r', encoding="utf-8") as ymlfile:
+  with open(os.path.join(path_config.ROOT_DIR, opt.config), 'r', encoding="utf-8") as ymlfile:
     config = yaml.safe_load(ymlfile)
 
   os.makedirs(opt.save_dir, exist_ok=True)
@@ -255,9 +257,21 @@ def main():
   test_label = test_df.PHQ_Binary.tolist()
 
   logger.info("Processing Train Data")
-  train_graphs, v_dim, a_dim, _ = make_graph(train_id+val_id, train_label+val_label, model_name=config['training']['embed_model'])
+  train_graphs, v_dim, a_dim, _ = make_graph(
+    ids = train_id+val_id,
+    labels = train_label+val_label,
+    model_name = config['training']['embed_model'],
+    colab_path = opt.colab_path,
+    use_summary_node = config['model']['use_summary_node']
+  )
   logger.info("Processing Validation Data")
-  val_graphs, _, _, _ = make_graph(test_id, test_label, model_name=config['training']['embed_model'])
+  val_graphs, _, _, _ = make_graph(
+    ids = test_id,
+    labels = test_label,
+    model_name = config['training']['embed_model'],
+    colab_path = opt.colab_path,
+  	use_summary_node = config['model']['use_summary_node']
+  )
 
   logger.info("__TRAINING_STATS__")
   train_counters = Counter(label.y.item() for label in train_graphs)
@@ -284,11 +298,12 @@ def main():
       vision_dim=v_dim,
       audio_dim=a_dim,
       hidden_channels=config['model']['h_dim'],
+      num_layers=config['model']['num_layers'],
       num_classes=2,
       dropout_dict=dropout_dict,
       heads=config['model']['head'],
       use_attention=config['model']['use_attention'],
-      use_cross_modal=config['model']['use_cross_modal']
+      use_summary_node=config['model']['use_summary_node']
   ).to(device)
   logger.info(f"Model initialized with:")
   logger.info(f"  - Text dim: {train_graphs[0].x.shape[1]}")

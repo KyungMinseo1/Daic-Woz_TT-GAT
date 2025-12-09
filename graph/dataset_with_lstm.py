@@ -27,14 +27,24 @@ logger.add(
 MAX_SEQ_LEN_VISION = 300
 MAX_SEQ_LEN_AUDIO = 300
 
+kor_to_eng_dict = {
+  "심리 상태 및 감정": "Psychological State and Emotional Well-being", 
+  "개인 특성 및 경험": "Personal Traits and Life Experiences",
+  "생활 환경 및 취미": "Living Conditions and Lifestyle Interests",
+  "경력, 교육 및 군 복무": "Career, Education, and Military Service History",
+  "대인 관계 및 가족": "Interpersonal Relationships and Family Dynamics"
+}
+
 def process_vision(df):
   timestamp = df.timestamp
-  au_r = df.filter(like='au').filter(like='_r')
+  ft_x = df.filter(like='ftx')
+  ft_y = df.filter(like='fty')
+  # au_r = df.filter(like='au').filter(like='_r')
   gz_df = df.filter(like='gz')
   gz_h = gz_df.filter(like='h')
   ps_t = df.filter(like='ps').filter(like='T')
   ps_r = df.filter(like='ps').filter(like='R')
-  features = pd.concat([au_r, gz_h, ps_t, ps_r], axis=1)
+  features = pd.concat([ft_x, ft_y, gz_h, ps_t, ps_r], axis=1)
   if features.shape[1] == 0:
     logger.warning("No vision features found! Adding a dummy feature.")
     features['dummy_feature'] = 0.0
@@ -51,33 +61,39 @@ def pad_sequence_numpy(seq, max_len):
     padding = np.zeros((max_len - seq_len, feature_dim))
     return np.vstack([seq, padding])
 
-def make_graph(ids, labels, model_name):
+def make_graph(ids, labels, model_name, colab_path=None, use_summary_node=True):
   try:
     finish_utterance = ["asked everything", "asked_everything", "it was great chatting with you"]
 
     logger.info("Getting your model")
     model = SentenceTransformer(model_name)
     logger.info("Model loaded")
-    dataframes = []
-    logger.info("Reading CSV")
-
-    for id in tqdm(ids, desc="Loading Dataframes"):
-      df = pd.read_csv(os.path.join(path_config.DATA_DIR, 'Transcription_Topic', f"{id}_transcript_topic.csv"))
-      v_df = pd.read_csv(os.path.join(path_config.DATA_DIR, 'Vision Summary', f"{id}_vision_summary.csv"))
-      a_df = pd.read_csv(os.path.join(path_config.DATA_DIR, 'Audio Summary', f"{id}_audio_summary.csv"))
-      dataframes.append((df, v_df, a_df))
     
-    logger.info("Switching CSV into Graphs")
     graphs = []
     dict_list = []
-
+    
     v_scaler = StandardScaler()
     a_scaler = StandardScaler()
     
-    for graph_idx, (df, v_df, a_df) in tqdm(enumerate(dataframes), desc="Dataframe -> Graph", total=len(dataframes)):
+    logger.info("Switching CSV into Graphs")
+    
+    if colab_path is not None:
+      logger.info(f"Using Colab Path: {colab_path}")
+
+    for graph_idx, id in tqdm(enumerate(ids), desc="Dataframe -> Graph", total=len(ids)):
+      if colab_path is not None:
+        df = pd.read_csv(os.path.join(colab_path, 'Transcription Topic', f"{id}_transcript_topic.csv"))
+        v_df = pd.read_csv(os.path.join(colab_path, 'Vision Summary', f"{id}_vision_summary.csv"))
+        a_df = pd.read_csv(os.path.join(colab_path, 'Audio Summary', f"{id}_audio_summary.csv"))
+        
+      else:
+        df = pd.read_csv(os.path.join(path_config.DATA_DIR, 'Transcription Topic', f"{id}_transcript_topic.csv"))
+        v_df = pd.read_csv(os.path.join(path_config.DATA_DIR, 'Vision Summary', f"{id}_vision_summary.csv"))
+        a_df = pd.read_csv(os.path.join(path_config.DATA_DIR, 'Audio Summary', f"{id}_audio_summary.csv"))
+    
       try:
         participant_dict = {
-          t : []
+          kor_to_eng_dict[t] : []
           for t in df.topic.unique() if type(t)==str
         }
         start_stop_dict = {}
@@ -125,7 +141,7 @@ def make_graph(ids, labels, model_name):
             stop_time = row.stop_time
           else:
             if temp!="" and not pd.isna(previous_topic):
-              participant_dict[previous_topic].append(temp)
+              participant_dict[kor_to_eng_dict[previous_topic]].append(temp)
               start_stop_dict[temp] = [start_time, stop_time]
             previous_topic = row.topic
             temp = value_str
@@ -136,12 +152,13 @@ def make_graph(ids, labels, model_name):
 
         # 마지막 값 저장
         if temp!="" and not pd.isna(previous_topic):
-          participant_dict[previous_topic].append(temp)
+          participant_dict[kor_to_eng_dict[previous_topic]].append(temp)
           start_stop_dict[temp] = [start_time, stop_time]
 
         # Topic/Summary nodes
         topic_nodes = model.encode(list(participant_dict.keys()))
-        summary_node = np.average(topic_nodes, axis=0).reshape(1, -1)
+        if use_summary_node:
+          summary_node = np.average(topic_nodes, axis=0).reshape(1, -1)
 
         transcription_list = []
         vision_seq_list = [] # Vision LSTM
@@ -150,23 +167,39 @@ def make_graph(ids, labels, model_name):
         audio_lengths_list = []
 
         node_types = []
-        node_types.append('summary')
+        if use_summary_node:
+          node_types.append('summary')
         node_types.extend(['topic'] * len(topic_nodes))
 
-        s_k_num = 1 + len(topic_nodes) # Summary(1) + Topics
+        if use_summary_node:
+          s_k_num = 1 + len(topic_nodes) # Summary(1) + Topics
+        else:
+          s_k_num = len(topic_nodes) # Topics
         current_node_idx = s_k_num
 
         source_nodes = []
         target_nodes = []
 
         # Topic -> Summary
-        for i in range(len(topic_nodes)):
-          source_nodes.append(1+i)
-          target_nodes.append(0)
-          if i < len(topic_nodes)-1:
+        if use_summary_node:
+       	  for i in range(len(topic_nodes)):
             source_nodes.append(1+i)
-            target_nodes.append(1+i+1)
+            target_nodes.append(0)
+            
+        # Topic <-> Topic
+        num_topics = len(topic_nodes)
+        start_offset = 1 if use_summary_node else 0
+
+        for i in range(num_topics):
+          source_idx = start_offset + i
+          for j in range(i + 1, num_topics):
+            target_idx = start_offset + j
+            source_nodes.append(source_idx)
+            target_nodes.append(target_idx)
+            source_nodes.append(target_idx)
+            target_nodes.append(source_idx)
         
+        global_prev_t_node_id = None
         # Text
         for topic_idx, (topic, utterances) in enumerate(participant_dict.items()):
           topic_node_id = 1 + topic_idx
@@ -186,12 +219,11 @@ def make_graph(ids, labels, model_name):
             target_nodes.append(topic_node_id)
 
             # Text -> Text
-            if u_idx > 0:
-              if 'prev_t_node_id' in locals():
-                source_nodes.append(prev_t_node_id)
-                target_nodes.append(t_node_id)
+            if global_prev_t_node_id is not None:
+              source_nodes.append(global_prev_t_node_id)
+              target_nodes.append(t_node_id)
 
-            prev_t_node_id = t_node_id
+            global_prev_t_node_id = t_node_id
 
             # Vision Node
             v_target = vision_df.loc[(start <= vision_df['timestamp']) & (vision_df['timestamp'] <= stop)]
@@ -238,7 +270,10 @@ def make_graph(ids, labels, model_name):
               target_nodes.append(v_node_id)
     
         # Static features (Summary, Topic, Text)
-        static_features = np.concatenate([summary_node, topic_nodes, np.array(transcription_list)])
+        if use_summary_node:
+          static_features = np.concatenate([summary_node, topic_nodes, np.array(transcription_list)])
+        else:
+          static_features = np.concatenate([topic_nodes, np.array(transcription_list)])
         text_dim = static_features.shape[1]
 
         # total x tensor -> initiation
@@ -378,6 +413,7 @@ if __name__=="__main__":
       vision_dim=v_dim,
       audio_dim=a_dim,
       hidden_channels=256,
+      num_layers=3,
       num_classes=2,
       dropout_dict={
           'text_dropout': 0.3,
@@ -387,7 +423,7 @@ if __name__=="__main__":
       },
       heads=8,
       use_attention=False,
-      use_cross_modal=False
+      use_summary_node=False
   ).to(device)
   logger.info("Loader/Model Ready")
   logger.info("-" * 50)
@@ -422,9 +458,19 @@ if __name__=="__main__":
   G = to_networkx(train_graphs[0], to_undirected=False)
 
   # 3. 노드 ID(0, 1, 2)에 레이블(A, B, C) 지정
-  node_labels = {i+1:k
-                for i, k in enumerate(dict_list[0].keys())}
-  node_labels[0] = 'Summary'
+  node_labels = {}
+  idx = 0
+
+  if sample_graph.node_types[0] == 'summary':
+    node_labels[idx] = 'Summary'
+    idx += 1
+
+  for k in dict_list[0].keys():
+    node_labels[idx] = k[:5] + ".."
+    idx += 1
+  
+  for i in range(idx, sample_graph.num_nodes):
+    node_labels[i] = ""
 
   # 4. 그래프 시각화
   plt.figure(figsize=(15, 15))
