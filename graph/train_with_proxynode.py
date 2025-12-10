@@ -10,8 +10,8 @@ from collections import Counter
 import torch.nn.functional as F
 from torch.cuda.amp import autocast, GradScaler
 
-from GAT_with_lstm_without_topic import GATClassifier
-from dataset_with_lstm_without_topic import make_graph
+from GAT_with_proxynode import GATClassifier
+from dataset_with_proxynode import make_graph
 
 
 import warnings
@@ -66,7 +66,7 @@ def train_gat(train_loader, model, criterion, optimizer, device, num_classes=2):
   all_preds = []
   all_labels = []
 
-  scaler = GradScaler()
+  # scaler = GradScaler()
 
   pbar = tqdm(train_loader, desc='Training', ncols=120)
   
@@ -87,18 +87,19 @@ def train_gat(train_loader, model, criterion, optimizer, device, num_classes=2):
 
     optimizer.zero_grad()
     
-    with autocast():
-      out = model(batch)
-      if num_classes == 2:
-        # Binary classification
-        loss = criterion(out, batch.y.float())
-        pred = (torch.sigmoid(out) > 0.5).long()
-      else:
-        # Multi-class classification
-        loss = criterion(out, batch.y)
-        pred = out.argmax(dim=1)
+    # with autocast():
+    out = model(batch)
+    if num_classes == 2:
+      # Binary classification
+      loss = criterion(out, batch.y.float())
+      pred = (torch.sigmoid(out) > 0.5).long()
+    else:
+      # Multi-class classification
+      loss = criterion(out, batch.y)
+      pred = out.argmax(dim=1)
 
-    # loss.backward()
+    loss.backward()
+
     # logger.info("--- Gradient Check ---")
     # for name, param in model.named_parameters():
     #   if param.grad is not None:
@@ -107,12 +108,12 @@ def train_gat(train_loader, model, criterion, optimizer, device, num_classes=2):
     #       logger.info(f"{name}: {grad_norm:.4f}")
     # logger.info("----------------------\n")
 
-    scaler.scale(loss).backward()
-    scaler.unscale_(optimizer)
+    # scaler.scale(loss).backward()
+    # scaler.unscale_(optimizer)
     # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=3.0)
-    scaler.step(optimizer)
-    scaler.update()
-    # optimizer.step()
+    # scaler.step(optimizer)
+    # scaler.update()
+    optimizer.step()
     
     total_norm = 0.0
     has_nan = False
@@ -207,7 +208,7 @@ def main():
                       help='Number of training epochs.')
   parser.add_argument('--resume', default='', type=str, metavar='PATH',
                       help='Path to latest checkpoint (default: none).')
-  parser.add_argument('--config', type=str, default='graph/configs/architecture_no_topic.yaml',
+  parser.add_argument('--config', type=str, default='graph/configs/architecture_proxy.yaml',
                       help="Which configuration to use. See into 'config' folder.")
   parser.add_argument('--save_dir', type=str, default='checkpoints', metavar='PATH',
                       help="Directory path to save model")
@@ -256,22 +257,20 @@ def main():
   test_label = test_df.PHQ_Binary.tolist()
 
   logger.info("Processing Train Data")
-  train_graphs, t_dim, v_dim, a_dim = make_graph(
+  train_graphs, v_dim, a_dim = make_graph(
     ids = train_id+val_id,
     labels = train_label+val_label,
     model_name = config['training']['embed_model'],
     colab_path = opt.colab_path,
-    use_summary_node = config['model']['use_summary_node'],
-    v_a_connect = config['model']['v_a_connect']
+    use_summary_node = config['model']['use_summary_node']
   )
   logger.info("Processing Validation Data")
-  val_graphs, _, _, _ = make_graph(
+  val_graphs, _, _ = make_graph(
     ids = test_id,
     labels = test_label,
     model_name = config['training']['embed_model'],
     colab_path = opt.colab_path,
-  	use_summary_node = config['model']['use_summary_node'],
-    v_a_connect = config['model']['v_a_connect']
+  	use_summary_node = config['model']['use_summary_node']
   )
 
   logger.info("__TRAINING_STATS__")
@@ -294,37 +293,17 @@ def main():
 
   logger.info("Setting Training Environment")
   device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-  if config['model']['use_text_proj']:
-    model = GATClassifier(
-        text_dim=train_graphs[0].x.shape[1],
-        vision_dim=v_dim,
-        audio_dim=a_dim,
-        hidden_channels=config['model']['h_dim'],
-        num_layers=config['model']['num_layers'],
-        num_classes=2,
-        dropout_dict=dropout_dict,
-        heads=config['model']['head'],
-        use_attention=config['model']['use_attention'],
-        use_summary_node=config['model']['use_summary_node'],
-        use_text_proj=config['model']['use_text_proj']
-    ).to(device)
-  else:
-    logger.warning("Because you are not using projection, hidden dimension is set to text dim")
-    model = GATClassifier(
-        text_dim=train_graphs[0].x.shape[1],
-        vision_dim=v_dim,
-        audio_dim=a_dim,
-        hidden_channels=t_dim,
-        num_layers=config['model']['num_layers'],
-        num_classes=2,
-        dropout_dict=dropout_dict,
-        heads=config['model']['head'],
-        use_attention=config['model']['use_attention'],
-        use_summary_node=config['model']['use_summary_node'],
-        use_text_proj=config['model']['use_text_proj']
-    ).to(device)
-
+  model = GATClassifier(
+      text_dim=train_graphs[0].x.shape[1],
+      vision_dim=v_dim,
+      audio_dim=a_dim,
+      hidden_channels=config['model']['h_dim'],
+      num_layers=config['model']['num_layers'],
+      num_classes=2,
+      dropout_dict=dropout_dict,
+      heads=config['model']['head'],
+      use_summary_node=config['model']['use_summary_node']
+  ).to(device)
   logger.info(f"Model initialized with:")
   logger.info(f"  - Text dim: {train_graphs[0].x.shape[1]}")
   logger.info(f"  - Vision dim: {v_dim}")
@@ -423,8 +402,8 @@ def main():
     # else:
     #  logger.info("Audio LSTM Grad: None")
 
-    check_lstm_grad(model.vision_lstm, "Vision LSTM")
-    check_lstm_grad(model.audio_lstm, "Audio LSTM")
+    # check_lstm_grad(model.vision_lstm, "Vision LSTM")
+    # check_lstm_grad(model.audio_lstm, "Audio LSTM")
 
     checkpoint = {
       'epoch': epoch,
@@ -521,7 +500,7 @@ if __name__=="__main__":
   main()
 
 # first
-#   ex) python graph/train_with_lstm_without_topic.py --save_dir checkpoints_graph3 --save_dir_ LSTM_graph_11(focal) --num_epochs 150 --patience 30
+#   ex) python graph/train_with_proxynode.py --save_dir checkpoints_graph_proxy --save_dir_ LSTM_graph_1(bce) --num_epochs 150 --patience 30
 #     -> epochs: 150, config_file: graph/configs/architecture.yaml, save_path: checkpoints_graph3/LSTM_graph_11(focal), patience: 30
 # resume
 #   ex) python graph/train.py --resume checkpoints/checkpoints1/best_model.pth

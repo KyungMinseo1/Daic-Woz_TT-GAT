@@ -9,12 +9,12 @@ training:
 
 model:
   h_dim: 256
-  head: 8
-  num_layers: 2
-  t_dropout: 0.3
-  g_dropout: 0.3
-  v_dropout: 0.3
-  a_dropout: 0.3
+  head: 4
+  num_layers: 3
+  t_dropout: 0.4
+  g_dropout: 0.4
+  v_dropout: 0.4
+  a_dropout: 0.4
   use_attention: True
   use_summary_node: True
   v_a_connect: False

@@ -132,22 +132,10 @@ class SimpleBiLSTM(nn.Module):
         return logits, h_final
 
 class GATClassifier(nn.Module):
-    def __init__(
-            self,
-            text_dim,
-            vision_dim,
-            audio_dim,
-            hidden_channels,
-            num_layers,
-            num_classes,
-            dropout_dict,
-            heads=8,
-            use_attention=False,
-            use_summary_node=True,
-            use_text_proj=True):
+    def __init__(self, text_dim, vision_dim, audio_dim, hidden_channels, num_layers, num_classes, dropout_dict, heads=8, use_summary_node=True):
         """
         Args:
-            text_dim: 텍스트 임베딩 차원 (summary, transcription)
+            text_dim: 텍스트 임베딩 차원 (summary, topic, transcription)
             vision_dim: vision 피처 원본 차원
             audio_dim: audio 피처 원본 차원
             hidden_channels: GAT hidden 차원
@@ -157,7 +145,6 @@ class GATClassifier(nn.Module):
             dropout: dropout 비율
             use_attention: AttentionLSTM 사용 여부
             use_summary_node: Summary Node 사용 여부
-            use_text_proj: Transcription Projection layer 사용 여부
         """
         super().__init__()
         
@@ -169,53 +156,29 @@ class GATClassifier(nn.Module):
         self.dropout_a = dropout_dict.get('audio_dropout', 0.1)
         self.num_layers = num_layers
         self.num_classes = num_classes
-        self.use_attention = use_attention
         self.use_summary_node = use_summary_node
-        self.use_text_proj = use_text_proj
 
         self.norm1 = nn.LayerNorm(hidden_channels * heads)
         self.norm2 = nn.LayerNorm(hidden_channels * heads)
         self.norm3 = nn.LayerNorm(hidden_channels * heads)
         self.norm4 = nn.LayerNorm(hidden_channels)
 
-        # Vision LSTM
-        if self.use_attention:
-            self.vision_lstm = AttentionBiLSTM(
-                input_dim=vision_dim, 
-                hidden_dim=hidden_channels,
-                output_dim=hidden_channels,
-                num_layers=2,
-                dropout=self.dropout_v
-            )
-        else:
-            self.vision_lstm = SimpleBiLSTM(
-                input_dim=vision_dim,
-                hidden_dim=hidden_channels,
-                output_dim=hidden_channels,
-                num_layers=2,
-                dropout=self.dropout_v
-            )
+        self.vision_proj = nn.Sequential(
+            nn.Linear(vision_dim, hidden_channels),
+            nn.LayerNorm(hidden_channels),
+            nn.ReLU(),
+            nn.Dropout(self.dropout_v)
+        )
+        
+        self.audio_proj = nn.Sequential(
+            nn.Linear(audio_dim, hidden_channels),
+            nn.LayerNorm(hidden_channels),
+            nn.ReLU(),
+            nn.Dropout(self.dropout_a)
+        )
 
-        # Audio LSTM
-        if self.use_attention:
-            self.audio_lstm = AttentionBiLSTM(
-                input_dim=audio_dim, 
-                hidden_dim=hidden_channels,
-                output_dim=hidden_channels,
-                num_layers=2,
-                dropout=self.dropout_a
-            )
-        else:
-            self.audio_lstm = SimpleBiLSTM(
-                input_dim=audio_dim,
-                hidden_dim=hidden_channels,
-                output_dim=hidden_channels,
-                num_layers=2,
-                dropout=self.dropout_a
-            )
-
-        if use_text_proj:
-            self.text_proj = nn.Linear(text_dim, hidden_channels)
+        # Text & Proxy & Topic & Summary Projection
+        self.text_proj = nn.Linear(text_dim, hidden_channels)
         self.dropout_text = nn.Dropout(self.dropout_t)
 
         self.conv1 = GATv2Conv(hidden_channels, hidden_channels, heads=heads, dropout=self.dropout_g, add_self_loops=True)
@@ -225,13 +188,6 @@ class GATClassifier(nn.Module):
 
         out_dim = 1 if num_classes == 2 else num_classes
         self.lin = nn.Linear(hidden_channels, out_dim)
-
-        if self.use_attention and hasattr(self.vision_lstm, 'bilstm'):
-            self.vision_lstm.bilstm.flatten_parameters()
-            self.audio_lstm.bilstm.flatten_parameters()
-        elif hasattr(self.vision_lstm, 'bilstm'):
-             self.vision_lstm.bilstm.flatten_parameters()
-             self.audio_lstm.bilstm.flatten_parameters()
 
         self._init_weights()
 
@@ -256,8 +212,6 @@ class GATClassifier(nn.Module):
         self.conv3.reset_parameters()
         
         nn.init.xavier_uniform_(self.lin.weight, gain=0.01)
-        if self.lin.bias is not None:
-            nn.init.zeros_(self.lin.bias)
 
     def forward(self, data):
         """
@@ -272,14 +226,9 @@ class GATClassifier(nn.Module):
         x_vision = data.x_vision    # (N_vision, seq_len, v_dim)
         x_audio = data.x_audio      # (N_audio, seq_len, a_dim)
         node_types = data.node_types
-        vision_lengths = data.vision_lengths
-        audio_lengths = data.audio_lengths
 
-        if self.use_text_proj:
-            x = self.text_proj(x)
-
-        text_features = self.dropout_text(x) # (N_total, Hidden)
-        final_x = text_features.clone()
+        final_x = self.text_proj(x)
+        final_x = self.dropout_text(final_x)
 
         flat_node_types = []
         if isinstance(node_types[0], list):
@@ -292,17 +241,13 @@ class GATClassifier(nn.Module):
 
         # Vision
         if x_vision.size(0) > 0 and len(vision_indices) > 0:
-            h_vision, _ = self.vision_lstm(x_vision, vision_lengths) # (N, Hidden)
-            if h_vision.dtype != final_x.dtype:
-                h_vision = h_vision.to(final_x.dtype)
+            h_vision = self.vision_proj(x_vision) # (N_vis, Hidden)
             if len(vision_indices) == h_vision.size(0):
                 final_x[vision_indices] = h_vision
 
         # Audio
         if x_audio.size(0) > 0 and len(audio_indices) > 0:
-            h_audio, _ = self.audio_lstm(x_audio, audio_lengths)
-            if h_audio.dtype != final_x.dtype:
-                h_audio = h_audio.to(final_x.dtype)
+            h_audio = self.audio_proj(x_audio) # (N_aud, Hidden)
             if len(audio_indices) == h_audio.size(0):
                 final_x[audio_indices] = h_audio
         
@@ -312,20 +257,14 @@ class GATClassifier(nn.Module):
         x = self.norm1(x)
         x = F.elu(x)
 		        
-        if self.num_layers == 2:
-          pass
-        else:
-          # GAT 레이어 2
-          x_in = x
-          x = F.dropout(x, p=self.dropout_g, training=self.training)
-          x = self.conv2(x, edge_index)
-          x = self.norm2(x + x_in)
-          x = F.elu(x)
+        if self.num_layers >= 2:
+            x_in = x
+            x = F.dropout(x, p=self.dropout_g, training=self.training)
+            x = self.conv2(x, edge_index)
+            x = self.norm2(x + x_in)
+            x = F.elu(x)
           
-          if self.num_layers == 3:
-            pass
-          else:
-            # GAT 레이어 3
+        if self.num_layers >= 3:
             x_in = x
             x = F.dropout(x, p=self.dropout_g, training=self.training)
             x = self.conv3(x, edge_index)
@@ -350,9 +289,15 @@ class GATClassifier(nn.Module):
           
         else:
           # Summary node가 할당되지 않았다고 가정
-          # Topic node가 없으므로 전체 global pool 진행
-          global_pool = global_mean_pool(x, batch)
-          out = F.dropout(global_pool, p=self.dropout_g, training=self.training)
+          # Topic node의 global pool 진행
+          topic_indices = [i for i, t in enumerate(flat_node_types) if t == 'topic']
+          topic_x = x[topic_indices]
+          topic_batch = batch[topic_indices]
+          if len(topic_x) > 0:
+                topic_nodes = global_mean_pool(topic_x, topic_batch)
+                out = F.dropout(topic_nodes, p=self.dropout_g, training=self.training)
+          else:
+                out = global_mean_pool(x, batch)
           
         out = self.lin(out)
         if self.num_classes == 2:

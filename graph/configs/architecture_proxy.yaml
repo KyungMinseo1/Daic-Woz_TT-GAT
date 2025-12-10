@@ -1,0 +1,19 @@
+training:
+  lr: 0.0001
+  weight-decay: 0.0005
+  bs: 8
+  scheduler: 'steplr'
+  gamma: 0.5
+  step-size: 100
+  embed_model: 'sentence-transformers/all-MiniLM-L6-v2'
+
+model:
+  h_dim: 256
+  head: 8
+  num_layers: 2
+  t_dropout: 0.1
+  g_dropout: 0.1
+  v_dropout: 0.1
+  a_dropout: 0.1
+  use_attention: True
+  use_summary_node: True
