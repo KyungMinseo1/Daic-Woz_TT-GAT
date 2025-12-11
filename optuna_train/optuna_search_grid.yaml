@@ -1,0 +1,14 @@
+training:
+  lr_list: [1e-5, 1e-4]
+  weight_decay_list: [1e-4, 1e-3]
+  bs: 4
+  scheduler: 'reducelr'
+  gamma: 0.5
+  step-size: 50
+  embed_model: 'sentence-transformers/all-MiniLM-L6-v2'
+
+model:
+  h_dim: 256
+  head: 8
+  num_layers_list: [2,4]
+  dropout_list: [0.1,0.5]
