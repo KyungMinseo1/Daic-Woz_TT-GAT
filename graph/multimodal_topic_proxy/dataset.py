@@ -223,11 +223,11 @@ def make_graph(ids, labels, model_name, colab_path=None, use_summary_node=True, 
             source_nodes.append(t_node_id)
             target_nodes.append(global_prev_t_node_id)
 
-          global_prev_t_node_id = t_node_id
-
           # Proxy -> Text
           source_nodes.append(p_node_id)
           target_nodes.append(t_node_id)
+
+          global_prev_t_node_id = t_node_id
 
           # Vision Node
           v_target = vision_df.loc[(start <= vision_df['timestamp']) & (vision_df['timestamp'] <= stop)]
@@ -419,7 +419,7 @@ if __name__=="__main__":
           'audio_dropout': 0.4
       },
       heads=8,
-      use_summary_node=False
+      use_summary_node=True
   ).to(device)
   logger.info("Loader/Model Ready")
   logger.info("-" * 50)
