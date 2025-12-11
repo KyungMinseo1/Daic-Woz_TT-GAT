@@ -1,5 +1,10 @@
+import sys
+from pathlib import Path
+project_root = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(project_root))
+
 import optuna
-import sys, os, argparse, yaml, path_config
+import os, argparse, yaml, path_config
 from collections import Counter
 import pandas as pd
 from loguru import logger
@@ -8,19 +13,19 @@ import torch
 from torch.optim import lr_scheduler
 from torch_geometric.loader import DataLoader
 
-from ..graph.multimodal_bilstm.GAT import GATClassifier as BiLSTMGAT
-from ..graph.multimodal_proxy.GAT import GATClassifier as ProxyGAT
-from ..graph.multimodal_topic_bilstm.GAT import GATClassifier as TopicBiLSTMGAT
-from ..graph.multimodal_topic_bilstm_proxy.GAT import GATClassifier as TopicProxyBiLSTMGAT
-from ..graph.multimodal_topic_proxy.GAT import GATClassifier as TopicProxyGAT
+from graph.multimodal_bilstm.GAT import GATClassifier as BiLSTMGAT
+from graph.multimodal_proxy.GAT import GATClassifier as ProxyGAT
+from graph.multimodal_topic_bilstm.GAT import GATClassifier as TopicBiLSTMGAT
+from graph.multimodal_topic_bilstm_proxy.GAT import GATClassifier as TopicProxyBiLSTMGAT
+from graph.multimodal_topic_proxy.GAT import GATClassifier as TopicProxyGAT
 
-from ..graph.multimodal_bilstm.dataset import make_graph as BiLSTM_make_graph
-from ..graph.multimodal_proxy.dataset import make_graph as Proxy_make_graph
-from ..graph.multimodal_topic_bilstm.dataset import make_graph as TopicBiLSTM_make_graph
-from ..graph.multimodal_topic_bilstm_proxy.dataset import make_graph as TopicProxyBiLSTM_make_graph
-from ..graph.multimodal_topic_proxy.dataset import make_graph as TopicProxy_make_graph
+from graph.multimodal_bilstm.dataset import make_graph as BiLSTM_make_graph
+from graph.multimodal_proxy.dataset import make_graph as Proxy_make_graph
+from graph.multimodal_topic_bilstm.dataset import make_graph as TopicBiLSTM_make_graph
+from graph.multimodal_topic_bilstm_proxy.dataset import make_graph as TopicProxyBiLSTM_make_graph
+from graph.multimodal_topic_proxy.dataset import make_graph as TopicProxy_make_graph
 
-from ..graph.train_val import train_gat, validation_gat
+from graph.train_val import train_gat, validation_gat
 
 logger.remove()
 logger.add(
@@ -294,7 +299,7 @@ def main():
 
   assert opt.mode is not None, logger.error("Need to clarify your model: 'multimodal_bilstm' | 'multimodal_proxy' | 'multimodal_topic_bilstm' | 'multimodal_topic_bilstm_proxy' | 'multimodal_topic_proxy'")
 
-  with open(os.path.join(path_config.ROOT_DIR, opt.optuna_config), 'r', encoding="utf-8") as ymlfile:
+  with open(os.path.join(path_config.BASE_DIR, opt.optuna_config), 'r', encoding="utf-8") as ymlfile:
     config = yaml.safe_load(ymlfile)
 
   os.makedirs(opt.save_dir, exist_ok=True)
@@ -411,4 +416,8 @@ def main():
   except Exception as e:
     logger.error(f"Failed to save visualization: {e}")
 
-# ex) python optuna_train/optuna_graph.py --num_epochs 300 --save_dir checkpoints_optuna --save_dir_ multimodal_proxy --patience 50 --mode multimodal_bilstm
+if __name__=="__main__":
+  main()
+
+# Example for multimodal_proxy
+#   -> python optuna_train/optuna_graph.py --mode multimodal_proxy --num_epochs 300 --patience 100 --save_dir checkpoints_optuna --save_dir_ multimodal_proxy
