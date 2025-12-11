@@ -453,7 +453,6 @@ if __name__=="__main__":
 
   legend_elements = [
     mpatches.Patch(color=color_map['summary'], label='Summary'),
-    mpatches.Patch(color=color_map['topic'], label='Topic'),
     mpatches.Patch(color=color_map['transcription'], label='Transcription'),
     mpatches.Patch(color=color_map['proxy'], label='Proxy'), # NEW
     mpatches.Patch(color=color_map['vision'], label='Vision'),
