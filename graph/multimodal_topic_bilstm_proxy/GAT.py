@@ -132,10 +132,22 @@ class SimpleBiLSTM(nn.Module):
         return logits, h_final
 
 class GATClassifier(nn.Module):
-    def __init__(self, text_dim, vision_dim, audio_dim, hidden_channels, num_layers, num_classes, dropout_dict, heads=8, use_attention=False, use_summary_node=True):
+    def __init__(
+            self,
+            text_dim,
+            vision_dim,
+            audio_dim,
+            hidden_channels,
+            num_layers,
+            num_classes,
+            dropout_dict,
+            heads=8,
+            use_attention=False,
+            use_summary_node=True,
+            use_text_proj=True):
         """
         Args:
-            text_dim: 텍스트 임베딩 차원 (summary, topic, transcription)
+            text_dim: 텍스트 임베딩 차원 (summary, transcription)
             vision_dim: vision 피처 원본 차원
             audio_dim: audio 피처 원본 차원
             hidden_channels: GAT hidden 차원
@@ -145,6 +157,7 @@ class GATClassifier(nn.Module):
             dropout: dropout 비율
             use_attention: AttentionLSTM 사용 여부
             use_summary_node: Summary Node 사용 여부
+            use_text_proj: Transcription Projection layer 사용 여부
         """
         super().__init__()
         
@@ -158,6 +171,7 @@ class GATClassifier(nn.Module):
         self.num_classes = num_classes
         self.use_attention = use_attention
         self.use_summary_node = use_summary_node
+        self.use_text_proj = use_text_proj
 
         self.norm1 = nn.LayerNorm(hidden_channels * heads)
         self.norm2 = nn.LayerNorm(hidden_channels * heads)
@@ -200,7 +214,8 @@ class GATClassifier(nn.Module):
                 dropout=self.dropout_a
             )
 
-        self.text_proj = nn.Linear(text_dim, hidden_channels)
+        if self.use_text_proj:
+            self.text_proj = nn.Linear(text_dim, hidden_channels)
         self.dropout_text = nn.Dropout(self.dropout_t)
 
         self.conv1 = GATv2Conv(hidden_channels, hidden_channels, heads=heads, dropout=self.dropout_g, add_self_loops=True)
@@ -260,7 +275,10 @@ class GATClassifier(nn.Module):
         vision_lengths = data.vision_lengths
         audio_lengths = data.audio_lengths
 
-        text_features = self.dropout_text(self.text_proj(x)) # (N_total, Hidden)
+        if self.use_text_proj:
+            x = self.text_proj(x)
+
+        text_features = self.dropout_text(x) # (N_total, Hidden)
         final_x = text_features.clone()
 
         flat_node_types = []
