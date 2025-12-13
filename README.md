@@ -32,11 +32,11 @@ pip install -r requirements.txt
 
 | 설정 이름 | 실행 명령어 | 설명 |
 | :--- | :--- | :--- |
-| **Multimodal BiLSTM** | `python -m graph.multimodal_bilstm.dataset` | 일반 멀티모달 BiLSTM 설정의 데이터셋 스크립트 실행 |
-| **Multimodal Proxy** | `python -m graph.multimodal_proxy.dataset` | 멀티모달 프록시(Proxy) 설정의 데이터셋 스크립트 실행 |
-| **Multimodal Topic BiLSTM** | `python -m graph.multimodal_topic_bilstm.dataset` | 토픽 기반 멀티모달 BiLSTM 설정의 데이터셋 스크립트 실행 |
-| **Multimodal Topic BiLSTM Proxy** | `python -m graph.multimodal_topic_bilstm_proxy.dataset` | 토픽 BiLSTM 프록시 설정의 데이터셋 스크립트 실행 |
-| **Multimodal Topic Proxy** | `python -m graph.multimodal_topic_proxy.dataset` | 멀티모달 토픽 프록시 설정의 데이터셋 스크립트 실행 |
+| **Multimodal BiLSTM** | `python -m graph.multimodal_bilstm.dataset` | 일반 멀티모달 BiLSTM 설정의 데이터셋 시각화 스크립트 실행 |
+| **Multimodal Proxy** | `python -m graph.multimodal_proxy.dataset` | 멀티모달 프록시(Proxy) 설정의 데이터셋 시각화 스크립트 실행 |
+| **Multimodal Topic BiLSTM** | `python -m graph.multimodal_topic_bilstm.dataset` | 토픽 기반 멀티모달 BiLSTM 설정의 데이터셋 시각화 스크립트 실행 |
+| **Multimodal Topic BiLSTM Proxy** | `python -m graph.multimodal_topic_bilstm_proxy.dataset` | 토픽 BiLSTM 프록시 설정의 데이터셋 시각화 스크립트 실행 |
+| **Multimodal Topic Proxy** | `python -m graph.multimodal_topic_proxy.dataset` | 멀티모달 토픽 프록시 설정의 데이터셋 시각화 스크립트 실행 |
 
 #### 3.2. 학습 스크립트 실행
 
