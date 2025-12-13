@@ -10,8 +10,11 @@ import pandas as pd
 from loguru import logger
 
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 from torch.optim import lr_scheduler
 from torch_geometric.loader import DataLoader
+from torch.utils.data import WeightedRandomSampler
 
 from graph.multimodal_bilstm.GAT import GATClassifier as BiLSTMGAT
 from graph.multimodal_proxy.GAT import GATClassifier as ProxyGAT
@@ -19,6 +22,7 @@ from graph.multimodal_topic_bilstm.GAT import GATClassifier as TopicBiLSTMGAT
 from graph.multimodal_topic_bilstm_proxy.GAT import GATClassifier as TopicProxyBiLSTMGAT
 from graph.multimodal_topic_proxy.GAT import GATClassifier as TopicProxyGAT
 from graph.unimodal_topic.GAT import GATClassifier as UniTopicGAT
+from graph.unimodal_topic_v2.GAT import GATClassifier as UniTopicV2GAT
 
 from graph.multimodal_bilstm.dataset import make_graph as BiLSTM_make_graph
 from graph.multimodal_proxy.dataset import make_graph as Proxy_make_graph
@@ -26,6 +30,7 @@ from graph.multimodal_topic_bilstm.dataset import make_graph as TopicBiLSTM_make
 from graph.multimodal_topic_bilstm_proxy.dataset import make_graph as TopicProxyBiLSTM_make_graph
 from graph.multimodal_topic_proxy.dataset import make_graph as TopicProxy_make_graph
 from graph.unimodal_topic.dataset import make_graph as UniTopic_make_graph
+from graph.unimodal_topic_v2.dataset import make_graph as UniTopicV2_make_graph
 
 from graph.train_val import train_gat, validation_gat
 
@@ -42,7 +47,8 @@ MODEL = {
   'multimodal_topic_bilstm':TopicBiLSTMGAT,
   'multimodal_topic_bilstm_proxy':TopicProxyBiLSTMGAT,
   'multimodal_topic_proxy':TopicProxyGAT,
-  'unimodal_topic':UniTopicGAT
+  'unimodal_topic':UniTopicGAT,
+  'unimodal_topic_v2':UniTopicV2GAT
 }
 
 MAKE_GRAPH = {
@@ -51,18 +57,43 @@ MAKE_GRAPH = {
   'multimodal_topic_bilstm':TopicBiLSTM_make_graph,
   'multimodal_topic_bilstm_proxy':TopicProxyBiLSTM_make_graph,
   'multimodal_topic_proxy':TopicProxy_make_graph,
-  'unimodal_topic':UniTopic_make_graph
+  'unimodal_topic':UniTopic_make_graph,
+  'unimodal_topic_v2':UniTopicV2_make_graph
 }
+
+class FocalLoss(nn.Module):
+  def __init__(self, alpha=0.25, gamma=2.0, reduction='mean'):
+    super(FocalLoss, self).__init__()
+    self.alpha = alpha
+    self.gamma = gamma
+    self.reduction = reduction
+
+  def forward(self, inputs, targets):
+    # inputs: Logits (Sigmoid 통과 전)
+    BCE_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction='none')
+    pt = torch.exp(-BCE_loss) # pt: 모델이 해당 클래스일 확률
+    
+    # Focal Term: (1 - pt)^gamma
+    F_loss = self.alpha * (1 - pt) ** self.gamma * BCE_loss
+
+    if self.reduction == 'mean':
+      return torch.mean(F_loss)
+    elif self.reduction == 'sum':
+      return torch.sum(F_loss)
+    else:
+      return F_loss
 
 def bilstm_objective(
     trial, config, mode,
-    train_loader, val_loader, criterion,
+    train_graphs, val_graphs, sampler,
     text_dim, vision_dim, audio_dim,
     epochs, device, checkpoints_dir, patience
     ): # with Attention
   
   lr_list = [float(i) for i in config['training']['lr_list']]
+  bs_list = [int(i) for i in config['training']['bs_list']]
   wd_list = [float(i) for i in config['training']['weight_decay_list']]
+  gm_list = [float(i) for i in config['training']['focal_gamma_list']]
   nl_list = [int(i) for i in config['model']['num_layers_list']]
   t_do_list = [float(i) for i in config['model']['text_dropout_list']]
   g_do_list = [float(i) for i in config['model']['graph_dropout_list']]
@@ -71,6 +102,7 @@ def bilstm_objective(
 
   lr_min = min(lr_list); lr_max = max(lr_list)
   wd_min = min(wd_list); wd_max = max(wd_list)
+  gm_min = min(gm_list); gm_max = max(gm_list)
   nl_min = min(nl_list); nl_max = max(nl_list)
   t_do_min = min(t_do_list); t_do_max = max(t_do_list)
   g_do_min = min(g_do_list); g_do_max = max(g_do_list)
@@ -78,7 +110,9 @@ def bilstm_objective(
   a_do_min = min(a_do_list); a_do_max = max(a_do_list)
 
   lr = trial.suggest_float("lr", lr_min, lr_max, log=True)
+  bs = trial.suggest_categorical("batch_size", bs_list)
   weight_decay = trial.suggest_float("weight_decay", wd_min, wd_max, log=True)
+  focal_gamma = trial.suggest_float("focal_gamma", gm_min, gm_max)
   optimizer = trial.suggest_categorical("optimizer", ["Adam", "AdamW", "MomentumSGD"])
   num_layers = trial.suggest_int("num_layers", nl_min, nl_max)
   t_dropout = trial.suggest_float("t_dropout", t_do_min, t_do_max)
@@ -95,6 +129,9 @@ def bilstm_objective(
     'audio_dropout':a_dropout
   }
 
+  train_loader = DataLoader(train_graphs, batch_size=bs, sampler=sampler, shuffle=False) # Using Sampler -> shuffle False
+  val_loader = DataLoader(val_graphs, batch_size=bs, shuffle=False)
+
   model = MODEL[mode](
     text_dim=text_dim,
     vision_dim=vision_dim,
@@ -108,6 +145,8 @@ def bilstm_objective(
     use_summary_node=True,
     use_text_proj=use_text_proj
   ).to(device)
+
+  criterion = FocalLoss(alpha=focal_gamma, gamma=2.0).to(device)
 
   if optimizer == "Adam":
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
@@ -203,13 +242,15 @@ def bilstm_objective(
 
 def objective(
     trial, config, mode,
-    train_loader, val_loader, criterion,
+    train_graphs, val_graphs, sampler,
     text_dim, vision_dim, audio_dim,
     epochs, device, checkpoints_dir, patience
     ): # with Attention
   
   lr_list = [float(i) for i in config['training']['lr_list']]
+  bs_list = [int(i) for i in config['training']['bs_list']]
   wd_list = [float(i) for i in config['training']['weight_decay_list']]
+  gm_list = [float(i) for i in config['training']['focal_gamma_list']]
   nl_list = [int(i) for i in config['model']['num_layers_list']]
   t_do_list = [float(i) for i in config['model']['text_dropout_list']]
   g_do_list = [float(i) for i in config['model']['graph_dropout_list']]
@@ -218,6 +259,7 @@ def objective(
 
   lr_min = min(lr_list); lr_max = max(lr_list)
   wd_min = min(wd_list); wd_max = max(wd_list)
+  gm_min = min(gm_list); gm_max = max(gm_list)
   nl_min = min(nl_list); nl_max = max(nl_list)
   t_do_min = min(t_do_list); t_do_max = max(t_do_list)
   g_do_min = min(g_do_list); g_do_max = max(g_do_list)
@@ -225,7 +267,9 @@ def objective(
   a_do_min = min(a_do_list); a_do_max = max(a_do_list)
   
   lr = trial.suggest_float("lr", lr_min, lr_max, log=True)
+  bs = trial.suggest_categorical("batch_size", bs_list)
   weight_decay = trial.suggest_float("weight_decay", wd_min, wd_max, log=True)
+  focal_gamma = trial.suggest_float("focal_gamma", gm_min, gm_max)
   optimizer = trial.suggest_categorical("optimizer", ["Adam", "AdamW", "MomentumSGD"])
   num_layers = trial.suggest_int("num_layers", nl_min, nl_max)
   t_dropout = trial.suggest_float("t_dropout", t_do_min, t_do_max)
@@ -240,6 +284,9 @@ def objective(
     'vision_dropout':v_dropout,
     'audio_dropout':a_dropout
   }
+
+  train_loader = DataLoader(train_graphs, batch_size=bs, sampler=sampler, shuffle=False) # Using Sampler -> shuffle False
+  val_loader = DataLoader(val_graphs, batch_size=bs, shuffle=False)
 
   if 'unimodal' in mode:
     model = MODEL[mode](
@@ -265,6 +312,8 @@ def objective(
       use_summary_node=True,
       use_text_proj=use_text_proj
     ).to(device)
+
+  criterion = FocalLoss(alpha=focal_gamma, gamma=2.0).to(device)
 
   if optimizer == "Adam":
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
@@ -388,14 +437,14 @@ def main():
   parser.add_argument('--colab_path', type=str, default=None, 
                       help="Write the path of temporary directory when using colab. (Transcription/Vision/Audio)")
   parser.add_argument('--mode', type=str, default=None,
-                      help="Model for optuna ['multimodal_bilstm', 'multimodal_proxy', 'multimodal_topic_bilstm', 'multimodal_topic_bilstm_proxy', 'multimodal_topic_proxy']")
+                      help=f"Model for optuna {list(MODEL.keys())}")
   parser.add_argument('--tt_connect', type=bool, default=False,
                       help="Text to text connection.")
   
   opt = parser.parse_args()
   logger.info(opt)
 
-  assert opt.mode is not None, logger.error("Need to clarify your model: 'multimodal_bilstm' | 'multimodal_proxy' | 'multimodal_topic_bilstm' | 'multimodal_topic_bilstm_proxy' | 'multimodal_topic_proxy'")
+  assert opt.mode is not None, logger.error(f"Need to clarify your model. Should be in {list(MODEL.keys())}")
 
   with open(os.path.join(path_config.BASE_DIR, opt.optuna_config), 'r', encoding="utf-8") as ymlfile:
     config = yaml.safe_load(ymlfile)
@@ -422,75 +471,60 @@ def main():
   test_id = test_df.Participant_ID.tolist()
   test_label = test_df.PHQ_Binary.tolist()
 
+  logger.info(f"Processing Train Data (Mode: {opt.mode})")
+
+  train_graphs, dim_list = MAKE_GRAPH[opt.mode](
+    ids = train_id+val_id,
+    labels = train_label+val_label,
+    model_name = config['training']['embed_model'],
+    colab_path = opt.colab_path,
+    use_summary_node = True,
+    t_t_connect=opt.tt_connect,
+    v_a_connect=False
+  )
+
+  logger.info("Processing Validation Data")
+  val_graphs, _ = MAKE_GRAPH[opt.mode](
+    ids = test_id,
+    labels = test_label,
+    model_name = config['training']['embed_model'],
+    colab_path = opt.colab_path,
+    use_summary_node = True,
+    t_t_connect=opt.tt_connect,
+    v_a_connect=False
+  )
+
   if 'unimodal' in opt.mode:
-    logger.info(f"Processing Multimodal Train Data (Mode: {opt.mode})")
-
-    train_graphs, t_dim = MAKE_GRAPH[opt.mode](
-      ids = train_id+val_id,
-      labels = train_label+val_label,
-      model_name = config['training']['embed_model'],
-      colab_path = opt.colab_path,
-      use_summary_node = True,
-      t_t_connect=opt.tt_connect,
-      v_a_connect=False
-    )
-
-    logger.info("Processing Multimodal Validation Data")
-    val_graphs, _ = MAKE_GRAPH[opt.mode](
-      ids = test_id,
-      labels = test_label,
-      model_name = config['training']['embed_model'],
-      colab_path = opt.colab_path,
-      use_summary_node = True,
-      t_t_connect=opt.tt_connect,
-      v_a_connect=False
-    )
-
     # temporary value
+    t_dim = dim_list
     v_dim = None
     a_dim = None
-
   else:
-    logger.info(f"Processing Multimodal Train Data (Mode: {opt.mode})")
-
-    train_graphs, t_dim, v_dim, a_dim = MAKE_GRAPH[opt.mode](
-      ids = train_id+val_id,
-      labels = train_label+val_label,
-      model_name = config['training']['embed_model'],
-      colab_path = opt.colab_path,
-      use_summary_node = True,
-      t_t_connect=opt.tt_connect,
-      v_a_connect=False
-    )
-
-    logger.info("Processing Multimodal Validation Data")
-    val_graphs, _, _, _ = MAKE_GRAPH[opt.mode](
-      ids = test_id,
-      labels = test_label,
-      model_name = config['training']['embed_model'],
-      colab_path = opt.colab_path,
-      use_summary_node = True,
-      t_t_connect=opt.tt_connect,
-      v_a_connect=False
-    )
+    t_dim = dim_list[0]
+    v_dim = dim_list[1]
+    a_dim = dim_list[2]
 
   logger.info("__TRAINING_STATS__")
-  train_counters = Counter(label.y.item() for label in train_graphs)
+  train_targets = [label.y.item() for label in train_graphs]
+  train_counters = Counter(train_targets)
   logger.info(train_counters)
 
-  class_weights = train_counters[0] / train_counters[1]
-  logger.info(f"Weights: {class_weights}")
+  weight_for_0 = 1.0 / train_counters[0]
+  weight_for_1 = 1.0 / train_counters[1]
 
-  logger.info("__VALIDATION_STATS__")
+  logger.info(f"Weights for 0: {weight_for_0} | Weights for 1: {weight_for_1}")
+
   val_counters = Counter(label.y.item() for label in val_graphs)
   logger.info(val_counters)
 
-  logger.info("Setting Training Environment")
+  samples_weights = [weight_for_1 if t == 1 else weight_for_0 for t in train_targets]
+
+  sampler = WeightedRandomSampler(weights=samples_weights, num_samples=len(samples_weights), replacement=True)
+
+  logger.info("Using WeightedRandomSampler for Class Balancing")
+
   device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-  criterion = torch.nn.BCEWithLogitsLoss(pos_weight=torch.tensor([class_weights]).to(device))
-  train_loader = DataLoader(train_graphs, batch_size=config['training']['bs'], shuffle=True)
-  val_loader = DataLoader(val_graphs, batch_size=config['training']['bs'], shuffle=False)
-  logger.info("Environment Ready")
+  # criterion = torch.nn.BCEWithLogitsLoss(pos_weight=torch.tensor([class_weights]).to(device))
 
   db_path = os.path.join(LOGS_DIR, "optuna_study.db")
   storage_name = f"sqlite:///{db_path}"
@@ -508,7 +542,7 @@ def main():
       study.optimize(
           lambda trial: bilstm_objective(
             trial=trial, config=config, mode=opt.mode,
-            train_loader=train_loader, val_loader=val_loader, criterion=criterion,
+            train_graphs=train_graphs, val_graphs=val_graphs, sampler=sampler,
             text_dim=t_dim, vision_dim=v_dim, audio_dim=a_dim,
             epochs=opt.num_epochs, device=device, checkpoints_dir=CHECKPOINTS_DIR, patience=opt.patience
           ),
@@ -518,7 +552,7 @@ def main():
       study.optimize(
           lambda trial: objective(
             trial=trial, config=config, mode=opt.mode,
-            train_loader=train_loader, val_loader=val_loader, criterion=criterion,
+            train_graphs=train_graphs, val_graphs=val_graphs, sampler=sampler,
             text_dim=t_dim, vision_dim=v_dim, audio_dim=a_dim,
             epochs=opt.num_epochs, device=device, checkpoints_dir=CHECKPOINTS_DIR, patience=opt.patience
           ),
@@ -549,4 +583,4 @@ if __name__=="__main__":
   main()
 
 # Example for multimodal_proxy
-#   -> python optuna_train/optuna_graph.py --mode multimodal_proxy --num_epochs 300 --patience 30 --save_dir checkpoints_optuna --save_dir_ multimodal_proxy
+#   -> python optuna_train/optuna_graph_weight_sampler.py --mode multimodal_proxy --num_epochs 300 --patience 30 --save_dir checkpoints_optuna --save_dir_ multimodal_proxy

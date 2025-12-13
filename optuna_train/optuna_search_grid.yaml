@@ -1,9 +1,9 @@
 training:
-  lr_list: [1e-5, 1e-4]
-  weight_decay_list: [1e-4, 1e-3]
-  bs: 4
+  lr_list: [1e-6, 1e-4]
+  weight_decay_list: [1e-5, 1e-3]
+  bs_list: [4, 8, 16]
   scheduler: 'reducelr'
-  gamma: 0.5
+  focal_gamma_list: [1.0, 5.0]
   step-size: 50
   embed_model: 'sentence-transformers/all-MiniLM-L6-v2'
 
@@ -11,4 +11,7 @@ model:
   h_dim: 256
   head: 8
   num_layers_list: [2,4]
-  dropout_list: [0.1,0.5]
+  text_dropout_list: [0.1,0.6]
+  graph_dropout_list: [0.1,0.6]
+  vision_dropout_list: [0.1,0.6]
+  audio_dropout_list: [0.1,0.6] 
