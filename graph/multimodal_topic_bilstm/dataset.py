@@ -361,7 +361,7 @@ if __name__=="__main__":
   logger.info(f"Labels distribution: {pd.Series(train_label).value_counts().to_dict()}")
   logger.info("-" * 50)
 
-  train_graphs, t_dim, v_dim, a_dim = make_graph(
+  train_graphs, (t_dim, v_dim, a_dim) = make_graph(
     ids = train_id,
     labels = train_label,
     model_name='sentence-transformers/all-MiniLM-L6-v2',
