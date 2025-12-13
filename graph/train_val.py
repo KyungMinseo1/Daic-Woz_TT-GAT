@@ -47,7 +47,7 @@ class FocalLoss(torch.nn.Module):
       return torch.mean(f_loss)
     return f_loss
 
-def train_gat(train_loader, model, criterion, optimizer, device, num_classes=2):  
+def train_gat(train_loader, model, criterion, optimizer, device, mode='multimodal', num_classes=2):  
   model.train()
   total_loss = 0
   all_preds = []
@@ -63,14 +63,14 @@ def train_gat(train_loader, model, criterion, optimizer, device, num_classes=2):
     if torch.isnan(batch.x).any() or torch.isinf(batch.x).any():
       logger.error(f"Batch {idx}: Input features (batch.x) contain NaN or Inf! Aborting batch.")
       continue
-      
-    if torch.isnan(batch.x_vision).any() or torch.isinf(batch.x_vision).any():
-      logger.error(f"Batch {idx}: Input features (batch.x_vision) contain NaN or Inf! Aborting batch.")
-      continue
-      
-    if torch.isnan(batch.x_audio).any() or torch.isinf(batch.x_audio).any():
-      logger.error(f"Batch {idx}: Input features (batch.x_audio) contain NaN or Inf! Aborting batch.")
-      continue
+    
+    if mode=='multimodal':
+      if torch.isnan(batch.x_vision).any() or torch.isinf(batch.x_vision).any():
+        logger.error(f"Batch {idx}: Input features (batch.x_vision) contain NaN or Inf! Aborting batch.")
+        continue
+      if torch.isnan(batch.x_audio).any() or torch.isinf(batch.x_audio).any():
+        logger.error(f"Batch {idx}: Input features (batch.x_audio) contain NaN or Inf! Aborting batch.")
+        continue
 
     optimizer.zero_grad()
     
