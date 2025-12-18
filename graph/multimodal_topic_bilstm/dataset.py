@@ -443,6 +443,7 @@ if __name__=="__main__":
       hidden_channels=256,
       num_layers=3,
       num_classes=2,
+      bilstm_num_layers=2,
       dropout_dict={
           'text_dropout': 0.3,
           'graph_dropout': 0.2,
