@@ -84,8 +84,8 @@ def make_graph(ids, labels, model_name, colab_path=None, use_summary_node=True, 
     
     # v_scaler = StandardScaler()
     # a_scaler = StandardScaler()
-    v_scaler = RobustScaler()
-    a_scaler = RobustScaler()
+    # v_scaler = RobustScaler()
+    # a_scaler = RobustScaler()
     
     logger.info("Switching CSV into Graphs")
     
@@ -120,20 +120,20 @@ def make_graph(ids, labels, model_name, colab_path=None, use_summary_node=True, 
         # Vision Scaling
         vision_df = process_vision(v_df)
         vision_df = vision_df.replace([np.inf, -np.inf], np.nan).fillna(0)      
-        vision_timestamps = vision_df['timestamp'].values
-        vision_df = vision_df.drop(columns=['timestamp'])
-        vision_scaled = v_scaler.fit_transform(vision_df.values)
-        vision_df = pd.DataFrame(vision_scaled, columns=vision_df.columns)
-        vision_df['timestamp'] = vision_timestamps
+        # vision_timestamps = vision_df['timestamp'].values
+        # vision_df = vision_df.drop(columns=['timestamp'])
+        # vision_scaled = v_scaler.fit_transform(vision_df.values)
+        # vision_df = pd.DataFrame(vision_scaled, columns=vision_df.columns)
+        # vision_df['timestamp'] = vision_timestamps
 
         # Audio Scaling
         audio_df = a_df.replace([np.inf, -np.inf], np.nan).fillna(0)
         if audio_df.shape[1] == 0:
           logger.warning("No audio features found! Adding a dummy feature.")
           audio_df['dummy_audio'] = 0.0
-        elif audio_df.shape[1] > 0:
-          audio_values = a_scaler.fit_transform(audio_df.values)
-          audio_df = pd.DataFrame(audio_values, columns=audio_df.columns)
+        # elif audio_df.shape[1] > 0:
+        #   audio_values = a_scaler.fit_transform(audio_df.values)
+        #   audio_df = pd.DataFrame(audio_values, columns=audio_df.columns)
 
         previous_index = None
         previous_topic = None
@@ -455,6 +455,7 @@ if __name__=="__main__":
       audio_dim=a_dim,
       hidden_channels=256,
       num_layers=3,
+      bilstm_num_layers=2,
       num_classes=2,
       dropout_dict={
           'text_dropout': 0.3,
