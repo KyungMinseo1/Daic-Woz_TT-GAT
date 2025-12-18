@@ -142,13 +142,13 @@ class GATClassifier(nn.Module):
         if x_vision.size(0) > 0 and len(vision_indices) > 0:
             h_vision = self.vision_proj(x_vision) # (N_vis, Hidden)
             if len(vision_indices) == h_vision.size(0):
-                final_x[vision_indices] = h_vision
+                final_x[vision_indices] = h_vision.to(x.dtype)
 
         # Audio
         if x_audio.size(0) > 0 and len(audio_indices) > 0:
             h_audio = self.audio_proj(x_audio) # (N_aud, Hidden)
             if len(audio_indices) == h_audio.size(0):
-                final_x[audio_indices] = h_audio
+                final_x[audio_indices] = h_audio.to(x.dtype)
         
         # GAT 레이어 1
         x = F.dropout(final_x, p=self.dropout_g, training=self.training)
@@ -341,13 +341,13 @@ class GATJKClassifier(nn.Module):
         if x_vision.size(0) > 0 and len(vision_indices) > 0:
             h_vision = self.vision_proj(x_vision) # (N_vis, Hidden)
             if len(vision_indices) == h_vision.size(0):
-                x[vision_indices] = h_vision
+                x[vision_indices] = h_vision.to(x.dtype)
 
         # Audio
         if x_audio.size(0) > 0 and len(audio_indices) > 0:
             h_audio = self.audio_proj(x_audio) # (N_aud, Hidden)
             if len(audio_indices) == h_audio.size(0):
-                x[audio_indices] = h_audio
+                x[audio_indices] = h_audio.to(x.dtype)
         
         xs = []
 
