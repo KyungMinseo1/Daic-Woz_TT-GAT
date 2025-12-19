@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 from torch_geometric.utils import to_networkx
 import matplotlib.patches as mpatches
 import networkx as nx
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, RobustScaler
 
 plt.rcParams['font.family'] ='Malgun Gothic'
 plt.rcParams['axes.unicode_minus'] =False
@@ -49,7 +49,7 @@ def process_vision(df):
   vision = pd.concat([timestamp, features], axis=1)
   return vision
 
-def make_graph(ids, labels, model_name, colab_path=None, use_summary_node=True, t_t_connect=False, v_a_connect=False, visualization=False):
+def make_graph(ids, labels, model_name, colab_path=None, use_summary_node=True, t_t_connect=False, visualization=False):
   try:
     finish_utterance = ["asked everything", "asked_everything", "it was great chatting with you"]
 
@@ -61,6 +61,8 @@ def make_graph(ids, labels, model_name, colab_path=None, use_summary_node=True, 
     
     # v_scaler = StandardScaler()
     # a_scaler = StandardScaler()
+    # v_sclaer = RobustScaler()
+    # a_sclaer = RobustScaler()
     
     logger.info("Switching CSV into Graphs")
     
@@ -251,7 +253,6 @@ if __name__=="__main__":
     labels = train_label,
     model_name='sentence-transformers/all-MiniLM-L6-v2',
     use_summary_node=True,
-    v_a_connect=False,
     visualization=True)
   t_dim = t_dim_list[0]
   logger.info(f"Transcription dim: {t_dim}")

@@ -266,7 +266,6 @@ class GATClassifier(nn.Module):
             flat_node_types = node_types
             
         vision_indices = [i for i, t in enumerate(flat_node_types) if t == 'vision']
-        audio_indices = [i for i, t in enumerate(flat_node_types) if t == 'audio']
 
         # Vision
         if x_vision.size(0) > 0 and len(vision_indices) > 0:
@@ -472,7 +471,6 @@ class GATJKClassifier(nn.Module):
             flat_node_types = node_types
             
         vision_indices = [i for i, t in enumerate(flat_node_types) if t == 'vision']
-        audio_indices = [i for i, t in enumerate(flat_node_types) if t == 'audio']
 
         # Vision
         if x_vision.size(0) > 0 and len(vision_indices) > 0:

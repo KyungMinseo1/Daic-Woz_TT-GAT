@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 from torch_geometric.utils import to_networkx
 import matplotlib.patches as mpatches
 import networkx as nx
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, RobustScaler
 
 plt.rcParams['font.family'] ='Malgun Gothic'
 plt.rcParams['axes.unicode_minus'] =False
@@ -75,6 +75,8 @@ def make_graph(ids, labels, model_name, colab_path=None, use_summary_node=True, 
     
     # v_scaler = StandardScaler()
     # a_scaler = StandardScaler()
+    # v_scaler = RobustScaler()
+    # a_scaler = RobustScaler()
     
     logger.info("Switching CSV into Graphs")
     
@@ -405,6 +407,7 @@ if __name__=="__main__":
       hidden_channels=256,
       num_layers=3,
       num_classes=2,
+      bilstm_num_layers=2,
       dropout_dict={
           'text_dropout': 0.3,
           'graph_dropout': 0.2,

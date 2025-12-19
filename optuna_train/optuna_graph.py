@@ -157,6 +157,7 @@ def bilstm_objective(
       vision_dim=vision_dim,
       hidden_channels=256 if use_text_proj else text_dim,
       num_layers=num_layers,
+      bilstm_num_layers=bilstm_num_layers,
       num_classes=2,
       dropout_dict=dropout_dict,
       heads=8,
@@ -172,6 +173,7 @@ def bilstm_objective(
       audio_dim=audio_dim,
       hidden_channels=256 if use_text_proj else text_dim,
       num_layers=num_layers,
+      bilstm_num_layers=bilstm_num_layers,
       num_classes=2,
       dropout_dict=dropout_dict,
       heads=8,
@@ -224,15 +226,39 @@ def bilstm_objective(
 
   try:
     for epoch in range(epochs):
-      train_loss, train_acc, train_f1 = train_gat(
-        train_loader=train_loader,
-        model=model,
-        criterion=criterion,
-        optimizer=optimizer,
-        device=device,
-        num_classes=2,
-        use_scaler=use_scaler
-      )
+      if 'unimodal' in mode:
+        train_loss, train_acc, train_f1 = train_gat(
+          train_loader=train_loader,
+          model=model,
+          criterion=criterion,
+          optimizer=optimizer,
+          device=device,
+          num_classes=2,
+          mode='unimodal',
+          use_scaler=use_scaler
+        )
+      elif 'bimodal' in mode:
+        train_loss, train_acc, train_f1 = train_gat(
+          train_loader=train_loader,
+          model=model,
+          criterion=criterion,
+          optimizer=optimizer,
+          device=device,
+          num_classes=2,
+          mode='bimodal',
+          use_scaler=use_scaler
+        )
+      else:
+        train_loss, train_acc, train_f1 = train_gat(
+          train_loader=train_loader,
+          model=model,
+          criterion=criterion,
+          optimizer=optimizer,
+          device=device,
+          num_classes=2,
+          mode='multimodal',
+          use_scaler=use_scaler
+        )
 
       torch.cuda.empty_cache()
 
@@ -429,6 +455,17 @@ def objective(
           num_classes=2,
           use_scaler=use_scaler
         )
+      elif 'bimodal' in mode:
+        train_loss, train_acc, train_f1 = train_gat(
+          train_loader=train_loader,
+          model=model,
+          criterion=criterion,
+          optimizer=optimizer,
+          device=device,
+          mode='bimodal',
+          num_classes=2,
+          use_scaler=use_scaler
+        )
       else:
         train_loss, train_acc, train_f1 = train_gat(
           train_loader=train_loader,
@@ -523,7 +560,7 @@ def main():
                       help="Text to text connection.")
   parser.add_argument('--version', type=int, default=1,
                       help="GATClassifier version.")
-  parser.add_argument('--use_scaler', type=bool, default=True,
+  parser.add_argument('--use_scaler', type=bool, default=False,
                       help="Using Gradiant Scaler (gradient can explode to Nan or Inf when turned on).")
     
   opt = parser.parse_args()
@@ -556,37 +593,9 @@ def main():
   test_id = test_df.Participant_ID.tolist()
   test_label = test_df.PHQ_Binary.tolist()
 
-  train_graphs, dim_list = MAKE_GRAPH[opt.mode](
-    ids = train_id+val_id,
-    labels = train_label+val_label,
-    model_name = config['training']['embed_model'],
-    colab_path = opt.colab_path,
-    use_summary_node = True,
-    t_t_connect=opt.tt_connect,
-    v_a_connect=False
-  )
-
-  logger.info("Processing Validation Data")
-  val_graphs, _ = MAKE_GRAPH[opt.mode](
-    ids = test_id,
-    labels = test_label,
-    model_name = config['training']['embed_model'],
-    colab_path = opt.colab_path,
-    use_summary_node = True,
-    t_t_connect=opt.tt_connect,
-    v_a_connect=False
-  )
-
-  if 'unimodal' in opt.mode:
-    # temporary value
-    t_dim = dim_list
-    v_dim = None
-    a_dim = None
-
-  elif 'bimodal' in opt.mode:
-    logger.info(f"Processing Bimodal Train Data (Mode: {opt.mode})")
-
-    train_graphs, (t_dim, v_dim) = MAKE_GRAPH[opt.mode](
+  if 'multimodal' in opt.mode:
+    logger.info(f"Processing Train Data (Mode: {opt.mode})")
+    train_graphs, dim_list = MAKE_GRAPH[opt.mode](
       ids = train_id+val_id,
       labels = train_label+val_label,
       model_name = config['training']['embed_model'],
@@ -596,8 +605,8 @@ def main():
       v_a_connect=False
     )
 
-    logger.info("Processing Multimodal Validation Data")
-    val_graphs, (_, _) = MAKE_GRAPH[opt.mode](
+    logger.info(f"Processing Validation Data (Mode: {opt.mode})")
+    val_graphs, _ = MAKE_GRAPH[opt.mode](
       ids = test_id,
       labels = test_label,
       model_name = config['training']['embed_model'],
@@ -607,13 +616,41 @@ def main():
       v_a_connect=False
     )
 
-    # temporary value
-    a_dim = None
-
-  else:
     t_dim = dim_list[0]
     v_dim = dim_list[1]
     a_dim = dim_list[2]
+
+  else:
+    logger.info(f"Processing Train Data (Mode: {opt.mode})")
+
+    train_graphs, dim_list = MAKE_GRAPH[opt.mode](
+      ids = train_id+val_id,
+      labels = train_label+val_label,
+      model_name = config['training']['embed_model'],
+      colab_path = opt.colab_path,
+      use_summary_node = True,
+      t_t_connect=opt.tt_connect
+    )
+
+    logger.info(f"Processing Validation Data (Mode: {opt.mode})")
+    val_graphs, _ = MAKE_GRAPH[opt.mode](
+      ids = test_id,
+      labels = test_label,
+      model_name = config['training']['embed_model'],
+      colab_path = opt.colab_path,
+      use_summary_node = True,
+      t_t_connect=opt.tt_connect
+    )
+
+    if 'bimodal' in opt.mode:
+      t_dim = dim_list[0]
+      v_dim = dim_list[1]
+      a_dim = None
+
+    elif 'unimodal' in opt.mode:
+      t_dim = dim_list[0]
+      v_dim = None
+      a_dim = None
 
   logger.info("__TRAINING_STATS__")
   train_targets = [label.y.item() for label in train_graphs]

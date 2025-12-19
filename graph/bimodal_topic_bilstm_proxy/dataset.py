@@ -82,7 +82,7 @@ def make_graph(ids, labels, model_name, colab_path=None, use_summary_node=True, 
     graphs = []
     
     # v_scaler = StandardScaler()
-    v_scaler = RobustScaler()
+    # v_scaler = RobustScaler()
     
     logger.info("Switching CSV into Graphs")
     
@@ -115,11 +115,11 @@ def make_graph(ids, labels, model_name, colab_path=None, use_summary_node=True, 
         # Vision Scaling
         vision_df = process_vision(v_df)
         vision_df = vision_df.replace([np.inf, -np.inf], np.nan).fillna(0)      
-        vision_timestamps = vision_df['timestamp'].values
-        vision_df = vision_df.drop(columns=['timestamp'])
-        vision_scaled = v_scaler.fit_transform(vision_df.values)
-        vision_df = pd.DataFrame(vision_scaled, columns=vision_df.columns)
-        vision_df['timestamp'] = vision_timestamps
+        # vision_timestamps = vision_df['timestamp'].values
+        # vision_df = vision_df.drop(columns=['timestamp'])
+        # vision_scaled = v_scaler.fit_transform(vision_df.values)
+        # vision_df = pd.DataFrame(vision_scaled, columns=vision_df.columns)
+        # vision_df['timestamp'] = vision_timestamps
 
         previous_index = None
         previous_topic = None

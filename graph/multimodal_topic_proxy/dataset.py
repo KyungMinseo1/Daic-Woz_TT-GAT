@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 from torch_geometric.utils import to_networkx
 import matplotlib.patches as mpatches
 import networkx as nx
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, RobustScaler
 
 plt.rcParams['font.family'] ='Malgun Gothic'
 plt.rcParams['axes.unicode_minus'] =False
@@ -52,6 +52,16 @@ def process_vision(df):
 def make_graph(ids, labels, model_name, colab_path=None, use_summary_node=True, t_t_connect=False, v_a_connect=False, visualization=False):
   try:
     finish_utterance = ["asked everything", "asked_everything", "it was great chatting with you"]
+    EXCLUDED_SESSIONS = ['342', '394', '398', '460']
+    INTERRUPTED_SESSIONS = ['373', '444']
+    NO_ALLIE = ['458', '451', '480']
+    blacklist = EXCLUDED_SESSIONS + INTERRUPTED_SESSIONS + NO_ALLIE
+
+    filtered_data = [(id, label) for id, label in zip(ids, labels) if str(id) not in blacklist]
+    if len(filtered_data) < len(ids):
+      logger.warning(f"Filtered out {len(ids) - len(filtered_data)} sessions from blacklist")
+
+    filtered_ids, filtered_labels = zip(*filtered_data) if filtered_data else ([], [])
 
     logger.info("Getting your model")
     model = SentenceTransformer(model_name)
@@ -61,13 +71,15 @@ def make_graph(ids, labels, model_name, colab_path=None, use_summary_node=True, 
     
     # v_scaler = StandardScaler()
     # a_scaler = StandardScaler()
+    # v_scaler = RobustScaler()
+    # a_sclaer = RobustScaler()
     
     logger.info("Switching CSV into Graphs")
     
     if colab_path is not None:
       logger.info(f"Using Colab Path: {colab_path}")
 
-    for graph_idx, id in tqdm(enumerate(ids), desc="Dataframe -> Graph", total=len(ids)):
+    for graph_idx, id in tqdm(enumerate(filtered_ids), desc="Dataframe -> Graph", total=len(filtered_ids)):
       if colab_path is not None:
         df = pd.read_csv(os.path.join(colab_path, 'Transcription Topic', f"{id}_transcript_topic.csv"))
         v_df = pd.read_csv(os.path.join(colab_path, 'Vision Summary', f"{id}_vision_summary.csv"))
@@ -299,7 +311,7 @@ def make_graph(ids, labels, model_name, colab_path=None, use_summary_node=True, 
           x_audio = torch.empty((0, len(audio_df.columns)))
 
         edge_index = torch.tensor([source_nodes, target_nodes], dtype=torch.long)
-        y = torch.tensor([labels[graph_idx]], dtype=torch.long)
+        y = torch.tensor([filtered_labels[graph_idx]], dtype=torch.long)
 
         data = Data(x=x, edge_index=edge_index, y=y, node_types=node_types)
         data.x_vision = x_vision

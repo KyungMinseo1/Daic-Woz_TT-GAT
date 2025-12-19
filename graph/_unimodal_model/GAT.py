@@ -239,14 +239,14 @@ class GATClassifier(nn.Module):
         x = self.norm1(x)
         x = F.elu(x)
 		        
-        if self.num_layers >= 2:
+        if self.num_layers >= 3:
             x_in = x
             x = F.dropout(x, p=self.dropout_g, training=self.training)
             x = self.conv2(x, edge_index)
             x = self.norm2(x + x_in)
             x = F.elu(x)
           
-        if self.num_layers >= 3:
+        if self.num_layers >= 4:
             x_in = x
             x = F.dropout(x, p=self.dropout_g, training=self.training)
             x = self.conv3(x, edge_index)
