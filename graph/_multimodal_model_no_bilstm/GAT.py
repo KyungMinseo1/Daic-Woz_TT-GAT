@@ -109,7 +109,7 @@ class GATClassifier(nn.Module):
         
         nn.init.xavier_uniform_(self.lin.weight, gain=0.01)
 
-    def forward(self, data):
+    def forward(self, data, explanation=False):
         """
         Args:
             data: PyG Data 객체
@@ -201,7 +201,10 @@ class GATClassifier(nn.Module):
         out = self.lin(out)
         if self.num_classes == 2:
             out = out.squeeze(-1)
-        return out
+        if explanation:
+            return out, x, flat_node_types
+        else:
+            return out
     
 class GATJKClassifier(nn.Module):
     def __init__(
@@ -310,7 +313,7 @@ class GATJKClassifier(nn.Module):
         
         nn.init.xavier_uniform_(self.lin.weight, gain=0.01)
 
-    def forward(self, data):
+    def forward(self, data, explanation=False):
         """
         Args:
             data: PyG Data 객체
@@ -410,4 +413,7 @@ class GATJKClassifier(nn.Module):
         out = self.lin(out)
         if self.num_classes == 2:
             out = out.squeeze(-1)
-        return out
+        if explanation:
+            return out, x, flat_node_types
+        else:
+            return out
