@@ -62,10 +62,10 @@ def pad_sequence_numpy(seq, max_len):
     padding = np.zeros((max_len - seq_len, feature_dim))
     return np.vstack([seq, padding])
 
-def make_graph(ids, labels, model_name, colab_path=None, use_summary_node=True, t_t_connect=False, v_a_connect=False, visualization=False):
+def make_graph(ids, labels, model_name, colab_path=None, use_summary_node=True, t_t_connect=False, v_a_connect=False, visualization=False, explanation=False):
   try:
     finish_utterance = ["asked everything", "asked_everything", "it was great chatting with you"]
-    EXCLUDED_SESSIONS = ['342', '394', '398', '460']                                                                # CHANGE FROM
+    EXCLUDED_SESSIONS = ['342', '394', '398', '460']
     INTERRUPTED_SESSIONS = ['373', '444']
     NO_ALLIE = ['458', '451', '480']
     blacklist = EXCLUDED_SESSIONS + INTERRUPTED_SESSIONS + NO_ALLIE
@@ -74,7 +74,7 @@ def make_graph(ids, labels, model_name, colab_path=None, use_summary_node=True, 
     if len(filtered_data) < len(ids):
       logger.warning(f"Filtered out {len(ids) - len(filtered_data)} sessions from blacklist")
 
-    filtered_ids, filtered_labels = zip(*filtered_data) if filtered_data else ([], [])                              # CHANGE TO
+    filtered_ids, filtered_labels = zip(*filtered_data) if filtered_data else ([], [])
 
     logger.info("Getting your model")
     model = SentenceTransformer(model_name)
@@ -84,15 +84,15 @@ def make_graph(ids, labels, model_name, colab_path=None, use_summary_node=True, 
     
     # v_scaler = StandardScaler()
     # a_scaler = StandardScaler()
-    # v_scaler = RobustScaler()                                                                                       # CHANGE
-    # a_scaler = RobustScaler()                                                                                       # CHANGE
+    # v_scaler = RobustScaler()
+    # a_scaler = RobustScaler()
     
     logger.info("Switching CSV into Graphs")
     
     if colab_path is not None:
       logger.info(f"Using Colab Path: {colab_path}")
 
-    for graph_idx, id in tqdm(enumerate(filtered_ids), desc="Dataframe -> Graph", total=len(filtered_ids)):         # CHANGE
+    for graph_idx, id in tqdm(enumerate(filtered_ids), desc="Dataframe -> Graph", total=len(filtered_ids)):
       if colab_path is not None:
         df = pd.read_csv(os.path.join(colab_path, 'Transcription Topic', f"{id}_transcript_topic.csv"))
         v_df = pd.read_csv(os.path.join(colab_path, 'Vision Summary', f"{id}_vision_summary.csv"))
@@ -120,20 +120,20 @@ def make_graph(ids, labels, model_name, colab_path=None, use_summary_node=True, 
         # Vision Scaling
         vision_df = process_vision(v_df)
         vision_df = vision_df.replace([np.inf, -np.inf], np.nan).fillna(0)      
-        # vision_timestamps = vision_df['timestamp'].values                                                   # CHANGE
-        # vision_df = vision_df.drop(columns=['timestamp'])                                                   # CHANGE
-        # vision_scaled = v_scaler.fit_transform(vision_df.values)                                            # CHANGE
-        # vision_df = pd.DataFrame(vision_scaled, columns=vision_df.columns)                                  # CHANGE
-        # vision_df['timestamp'] = vision_timestamps                                                          # CHANGE
+        # vision_timestamps = vision_df['timestamp'].values
+        # vision_df = vision_df.drop(columns=['timestamp'])
+        # vision_scaled = v_scaler.fit_transform(vision_df.values)
+        # vision_df = pd.DataFrame(vision_scaled, columns=vision_df.columns)
+        # vision_df['timestamp'] = vision_timestamps
 
         # Audio Scaling
         audio_df = a_df.replace([np.inf, -np.inf], np.nan).fillna(0)
         if audio_df.shape[1] == 0:
           logger.warning("No audio features found! Adding a dummy feature.")
           audio_df['dummy_audio'] = 0.0
-        # elif audio_df.shape[1] > 0:                                                                         # CHANGE
-          # audio_values = a_scaler.fit_transform(audio_df.values)                                            # CHANGE
-          # audio_df = pd.DataFrame(audio_values, columns=audio_df.columns)                                   # CHANGE
+        # elif audio_df.shape[1] > 0:
+          # audio_values = a_scaler.fit_transform(audio_df.values)
+          # audio_df = pd.DataFrame(audio_values, columns=audio_df.columns)
 
         previous_index = None
         previous_topic = None
@@ -328,7 +328,7 @@ def make_graph(ids, labels, model_name, colab_path=None, use_summary_node=True, 
             data_audio_lengths = torch.tensor([], dtype=torch.long)
 
         edge_index = torch.tensor([source_nodes, target_nodes], dtype=torch.long)
-        y = torch.tensor([filtered_labels[graph_idx]], dtype=torch.long)                        # CHANGE
+        y = torch.tensor([filtered_labels[graph_idx]], dtype=torch.long)
 
         data = Data(x=x, edge_index=edge_index, y=y, node_types=node_types)
         data.x_vision = x_vision
@@ -349,11 +349,17 @@ def make_graph(ids, labels, model_name, colab_path=None, use_summary_node=True, 
       v_dim = 0
       a_dim = 0
 
-    return graphs, (text_dim, v_dim, a_dim)
+    if explanation:
+      return graphs, (text_dim, v_dim, a_dim), topic_node_id_dict
+    else:
+      return graphs, (text_dim, v_dim, a_dim)
   
   except Exception as e:
     logger.error(e)
-    return [], (0, 0, 0)
+    if explanation:
+      return [], (0, 0, 0), None
+    else:
+      return [], (0, 0, 0)
 
 if __name__=="__main__":
   # train_df = pd.read_csv(os.path.join(path_config.DATA_DIR, 'train_split_Depression_AVEC2017.csv'))

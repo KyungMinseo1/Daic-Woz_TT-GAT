@@ -49,7 +49,7 @@ def process_vision(df):
   vision = pd.concat([timestamp, features], axis=1)
   return vision
 
-def make_graph(ids, labels, model_name, colab_path=None, use_summary_node=True, t_t_connect=False, v_a_connect=False, visualization=False):
+def make_graph(ids, labels, model_name, colab_path=None, use_summary_node=True, t_t_connect=False, v_a_connect=False, visualization=False, explanation=False):
   try:
     finish_utterance = ["asked everything", "asked_everything", "it was great chatting with you"]
     EXCLUDED_SESSIONS = ['342', '394', '398', '460']
@@ -330,11 +330,17 @@ def make_graph(ids, labels, model_name, colab_path=None, use_summary_node=True, 
       v_dim = 0
       a_dim = 0
 
-    return graphs, (text_dim, v_dim, a_dim)
+    if explanation:
+      return graphs, (text_dim, v_dim, a_dim), topic_node_id_dict
+    else:
+      return graphs, (text_dim, v_dim, a_dim)
   
   except Exception as e:
     logger.error(e)
-    return [], (0, 0, 0)
+    if explanation:
+      return [], (0, 0, 0), None
+    else:
+      return [], (0, 0, 0)
 
 if __name__=="__main__":
   # train_df = pd.read_csv(os.path.join(path_config.DATA_DIR, 'train_split_Depression_AVEC2017.csv'))
