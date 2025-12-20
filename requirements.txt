@@ -1,11 +1,14 @@
+loguru
+
 numpy==1.26.4
 pandas
-loguru
-matplotlib
-scikit-learn
 
+scikit-learn
 optuna
+
 plotly
+seaborn
+matplotlib
 
 torch==2.8.0+cu128 --index-url https://download.pytorch.org/whl/cu128
 
