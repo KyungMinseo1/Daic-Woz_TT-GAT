@@ -213,3 +213,4 @@ checkpoints*
 /model
 temp*
 /sample
+!checkpoints_optuna
