@@ -21,6 +21,10 @@ from graph._multimodal_model_no_bilstm.GAT import GATClassifier as NoBiLSTMGAT, 
 from graph._unimodal_model.GAT import GATClassifier as UniGAT, GATJKClassifier as UniV2GAT
 from graph._bimodal_model_bilstm.GAT import GATClassifier as BiGAT, GATJKClassifier as BiV2GAT
 
+from graph._multimodal_model_bilstm.GAT_explanation import GATJKClassifier as BiLSTMV2GAT_EX
+from graph._multimodal_model_no_bilstm.GAT_explanation import GATJKClassifier as NoBiLSTMV2GAT_EX
+from graph._bimodal_model_bilstm.GAT_explanation import GATJKClassifier as BiV2GAT_EX
+
 from graph.multimodal_bilstm.dataset import make_graph as BiLSTM_make_graph
 from graph.multimodal_proxy.dataset import make_graph as Proxy_make_graph
 from graph.multimodal_topic_bilstm.dataset import make_graph as TopicBiLSTM_make_graph
@@ -29,7 +33,14 @@ from graph.multimodal_topic_proxy.dataset import make_graph as TopicProxy_make_g
 from graph.unimodal_topic.dataset import make_graph as UniTopic_make_graph
 from graph.bimodal_topic_bilstm_proxy.dataset import make_graph as BiTopicProxy_make_graph
 
-from graph.train_val import train_gat, validation_gat
+from graph.multimodal_bilstm.dataset_explanation import make_graph as BiLSTM_make_graph_EX
+from graph.multimodal_proxy.dataset_explanation import make_graph as Proxy_make_graph_EX
+from graph.multimodal_topic_bilstm.dataset_explanation import make_graph as TopicBiLSTM_make_graph_EX
+from graph.multimodal_topic_bilstm_proxy.dataset_explanation import make_graph as TopicProxyBiLSTM_make_graph_EX
+from graph.multimodal_topic_proxy.dataset_explanation import make_graph as TopicProxy_make_graph_EX
+from graph.bimodal_topic_bilstm_proxy.dataset_explanation import make_graph as BiTopicProxy_make_graph_EX
+
+from graph.train_val import train_gat, validation_gat, FocalLoss
 
 logger.remove()
 logger.add(
@@ -58,6 +69,15 @@ V2_MODEL = {
   'bimodal_topic_bilstm_proxy':BiV2GAT
 }
 
+EX_MODEL = {
+  'multimodal_bilstm':BiLSTMV2GAT_EX,
+  'multimodal_proxy':NoBiLSTMV2GAT_EX,
+  'multimodal_topic_bilstm':BiLSTMV2GAT_EX,
+  'multimodal_topic_bilstm_proxy':BiLSTMV2GAT_EX,
+  'multimodal_topic_proxy':NoBiLSTMV2GAT_EX,
+  'bimodal_topic_bilstm_proxy':BiV2GAT_EX
+}
+
 MAKE_GRAPH = {
   'multimodal_bilstm':BiLSTM_make_graph,
   'multimodal_proxy':Proxy_make_graph,
@@ -68,31 +88,17 @@ MAKE_GRAPH = {
   'bimodal_topic_bilstm_proxy':BiTopicProxy_make_graph
 }
 
-class FocalLoss(nn.Module):
-  def __init__(self, alpha=0.75, gamma=2.0, reduction='mean'):
-    super(FocalLoss, self).__init__()
-    self.alpha = alpha
-    self.gamma = gamma
-    self.reduction = reduction
-
-  def forward(self, inputs, targets):
-    # inputs: Logits (Sigmoid 통과 전)
-    BCE_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction='none')
-    pt = torch.exp(-BCE_loss) # pt: 모델이 해당 클래스일 확률
-    
-    # Focal Term: (1 - pt)^gamma
-    alpha_t = self.alpha * targets + (1 - self.alpha) * (1 - targets)
-    F_loss = alpha_t * (1 - pt) ** self.gamma * BCE_loss
-
-    if self.reduction == 'mean':
-      return torch.mean(F_loss)
-    elif self.reduction == 'sum':
-      return torch.sum(F_loss)
-    else:
-      return F_loss
+EX_MAKE_GRAPH = {
+  'multimodal_bilstm':BiLSTM_make_graph_EX,
+  'multimodal_proxy':Proxy_make_graph_EX,
+  'multimodal_topic_bilstm':TopicBiLSTM_make_graph_EX,
+  'multimodal_topic_bilstm_proxy':TopicProxyBiLSTM_make_graph_EX,
+  'multimodal_topic_proxy':TopicProxy_make_graph_EX,
+  'bimodal_topic_bilstm_proxy':BiTopicProxy_make_graph_EX
+}
 
 def bilstm_objective(
-    trial, config, mode, version,
+    trial, config, mode, version, explanation,
     train_graphs, val_graphs, pos_weight,
     text_dim, vision_dim, audio_dim,
     epochs, device, checkpoints_dir, patience, use_scaler
@@ -146,10 +152,13 @@ def bilstm_objective(
   train_loader = DataLoader(train_graphs, batch_size=bs, shuffle=True) # Using Sampler -> shuffle False
   val_loader = DataLoader(val_graphs, batch_size=bs, shuffle=False)
 
-  if int(version) == 1:
-    model_dict = MODEL
-  elif int(version) == 2:
-    model_dict = V2_MODEL
+  if explanation:
+    model_dict = EX_MODEL
+  else:
+    if int(version) == 1:
+      model_dict = MODEL
+    elif int(version) == 2:
+      model_dict = V2_MODEL
 
   if 'bimodal' in mode:
     model = model_dict[mode](
@@ -320,7 +329,7 @@ def bilstm_objective(
   return float(best_val_f1)
 
 def objective(
-    trial, config, mode, version,
+    trial, config, mode, version, explanation,
     train_graphs, val_graphs, pos_weight,
     text_dim, vision_dim, audio_dim,
     epochs, device, checkpoints_dir, patience, use_scaler
@@ -560,6 +569,8 @@ def main():
                       help="Text to text connection.")
   parser.add_argument('--version', type=int, default=1,
                       help="GATClassifier version.")
+  parser.add_argument('--explanation', type=bool, default=False,
+                      help="Use GATClassifier/dataset of Explanation version.")
   parser.add_argument('--use_scaler', type=bool, default=False,
                       help="Using Gradiant Scaler (gradient can explode to Nan or Inf when turned on).")
     
@@ -593,9 +604,14 @@ def main():
   test_id = test_df.Participant_ID.tolist()
   test_label = test_df.PHQ_Binary.tolist()
 
+  if opt.explanation:
+    make_graph = EX_MAKE_GRAPH
+  else:
+    make_graph = MAKE_GRAPH
+
   if 'multimodal' in opt.mode:
     logger.info(f"Processing Train Data (Mode: {opt.mode})")
-    train_graphs, dim_list = MAKE_GRAPH[opt.mode](
+    train_graphs, dim_list = make_graph[opt.mode](
       ids = train_id+val_id,
       labels = train_label+val_label,
       model_name = config['training']['embed_model'],
@@ -606,7 +622,7 @@ def main():
     )
 
     logger.info(f"Processing Validation Data (Mode: {opt.mode})")
-    val_graphs, _ = MAKE_GRAPH[opt.mode](
+    val_graphs, _ = make_graph[opt.mode](
       ids = test_id,
       labels = test_label,
       model_name = config['training']['embed_model'],
@@ -623,7 +639,7 @@ def main():
   else:
     logger.info(f"Processing Train Data (Mode: {opt.mode})")
 
-    train_graphs, dim_list = MAKE_GRAPH[opt.mode](
+    train_graphs, dim_list = make_graph[opt.mode](
       ids = train_id+val_id,
       labels = train_label+val_label,
       model_name = config['training']['embed_model'],
@@ -633,7 +649,7 @@ def main():
     )
 
     logger.info(f"Processing Validation Data (Mode: {opt.mode})")
-    val_graphs, _ = MAKE_GRAPH[opt.mode](
+    val_graphs, _ = make_graph[opt.mode](
       ids = test_id,
       labels = test_label,
       model_name = config['training']['embed_model'],
@@ -683,7 +699,7 @@ def main():
     if 'bilstm' in opt.mode:
       study.optimize(
           lambda trial: bilstm_objective(
-            trial=trial, config=config, mode=opt.mode, version=opt.version,
+            trial=trial, config=config, mode=opt.mode, version=opt.version, explanation=opt.explanation,
             train_graphs=train_graphs, val_graphs=val_graphs, pos_weight=class_weights_tensor,
             text_dim=t_dim, vision_dim=v_dim, audio_dim=a_dim,
             epochs=opt.num_epochs, device=device, checkpoints_dir=CHECKPOINTS_DIR, patience=opt.patience, use_scaler=opt.use_scaler
@@ -693,7 +709,7 @@ def main():
     else:
       study.optimize(
           lambda trial: objective(
-            trial=trial, config=config, mode=opt.mode, version=opt.version,
+            trial=trial, config=config, mode=opt.mode, version=opt.version, explanation=opt.explanation,
             train_graphs=train_graphs, val_graphs=val_graphs, pos_weight=class_weights_tensor,
             text_dim=t_dim, vision_dim=v_dim, audio_dim=a_dim,
             epochs=opt.num_epochs, device=device, checkpoints_dir=CHECKPOINTS_DIR, patience=opt.patience, use_scaler=opt.use_scaler
