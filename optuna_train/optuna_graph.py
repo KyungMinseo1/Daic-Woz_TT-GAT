@@ -40,7 +40,7 @@ from graph.multimodal_topic_bilstm_proxy.dataset_explanation import make_graph a
 from graph.multimodal_topic_proxy.dataset_explanation import make_graph as TopicProxy_make_graph_EX
 from graph.bimodal_topic_bilstm_proxy.dataset_explanation import make_graph as BiTopicProxy_make_graph_EX
 
-from graph.train_val import train_gat, validation_gat, FocalLoss
+from graph.train_val import train_gat, validation_gat, FocalLoss, check_lstm_grad
 
 logger.remove()
 logger.add(
@@ -277,6 +277,9 @@ def bilstm_objective(
         device=device,
         num_classes=2
       )
+
+      check_lstm_grad(model.vision_lstm, "Vision LSTM")
+      check_lstm_grad(model.audio_lstm, "Audio LSTM")
 
       trial.report(val_f1, epoch)
       if trial.should_prune():
