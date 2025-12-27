@@ -109,15 +109,15 @@ def process_vision(df, start_stop_list_ellie):
     condition = (start <= timestamp_values) & (timestamp_values <= stop)
     keep_mask[condition] = False
   timestamp = df.timestamp
-  ft_x = df.filter(like='ftx')
-  ft_y = df.filter(like='fty')
+  # ft_x = df.filter(like='ftx')
+  # ft_y = df.filter(like='fty')
   au_r = df.filter(like='auAU').filter(like='_r')
   gz_df = df.filter(like='gz')
   # gz_h = gz_df.filter(like='h')
   ps_t = df.filter(like='ps').filter(like='T')
   ps_r = df.filter(like='ps').filter(like='R')
-  features = pd.concat([au_r, gz_df, ft_x, ft_y, ps_t, ps_r], axis=1)
-  # features = pd.concat([au_r, gz_df, ps_t, ps_r], axis=1)
+  # features = pd.concat([au_r, gz_df, ft_x, ft_y, ps_t, ps_r], axis=1)
+  features = pd.concat([au_r, gz_df, ps_t, ps_r], axis=1)
   if features.shape[1] == 0:
     logger.warning("No vision features found! Adding a dummy feature.")
     features['dummy_feature'] = 0.0
@@ -142,7 +142,9 @@ def process_audio(df, start_stop_list_ellie):
       }
     )
   timestamp = renamed_df[['index']]
-  audio = renamed_df.drop(['index'], axis=1)
+  audio1 = renamed_df[['F0', 'VUV', 'NAQ', 'QOQ', 'H1H2', 'PSP', 'MDQ', 'peakSlope', 'Rd']]
+  audio2 = renamed_df[['F1', 'F2', 'F3', 'F4', 'F5']]
+  audio = pd.concat([audio1, audio2], axis=1)
   audio.loc[audio.VUV==0] = 0
   final_audio = pd.concat([timestamp, audio], axis=1)
   return final_audio[keep_mask]
