@@ -31,11 +31,11 @@ class Attention(nn.Module):
 class AttentionBiLSTM(nn.Module):
     def __init__(self, input_dim:int, hidden_dim:int, output_dim:int, num_layers:int=2, dropout:float=0.3):
         super().__init__()
-        self.bilstm = nn.LSTM(input_dim, hidden_dim, num_layers=num_layers, batch_first=True, bidirectional=True, dropout=dropout if num_layers>1 else 0.0)
-        self.attention = Attention(hidden_dim * 2)
+        self.bilstm = nn.LSTM(input_dim, hidden_dim, num_layers=num_layers, batch_first=True, bidirectional=False, dropout=dropout if num_layers>1 else 0.0)
+        self.attention = Attention(hidden_dim)
         # self.multihead_attn = nn.MultiheadAttention(hidden_dim * 2, num_heads=4, dropout=dropout, batch_first=True)
         self.dropout = nn.Dropout(dropout)
-        self.fc = nn.Linear(hidden_dim*2, output_dim)
+        self.fc = nn.Linear(hidden_dim, output_dim)
 
         self._init_weights()
 
@@ -74,7 +74,7 @@ class AttentionBiLSTM(nn.Module):
         packed = pack_padded_sequence(x, lengths.cpu(), batch_first=True, enforce_sorted=False)
         packed_out, (h_n, c_n) = self.bilstm(packed)
 
-        # output shape: (B, seq_len, hidden*2)
+        # output shape: (B, seq_len, hidden)
         lstm_output, _ = pad_packed_sequence(packed_out, batch_first=True)
 
         context_vector = self.attention(lstm_output)
@@ -89,9 +89,9 @@ class AttentionBiLSTM(nn.Module):
 class SimpleBiLSTM(nn.Module):
     def __init__(self, input_dim:int, hidden_dim:int, output_dim:int, num_layers:int=2, dropout:float=0.3):
         super().__init__()
-        self.bilstm = nn.LSTM(input_dim, hidden_dim, num_layers=num_layers, batch_first=True, bidirectional=True, dropout=dropout if num_layers>1 else 0.0)
+        self.bilstm = nn.LSTM(input_dim, hidden_dim, num_layers=num_layers, batch_first=True, bidirectional=False, dropout=dropout if num_layers>1 else 0.0)
         self.dropout = nn.Dropout(dropout)
-        self.fc = nn.Linear(hidden_dim*2, output_dim)
+        self.fc = nn.Linear(hidden_dim, output_dim)
 
         self._init_weights()
 
@@ -119,14 +119,7 @@ class SimpleBiLSTM(nn.Module):
         packed = pack_padded_sequence(x, lengths.cpu(), batch_first=True, enforce_sorted=False)
         packed_out, (h_n, c_n) = self.bilstm(packed)
 
-        if self.bilstm.bidirectional:
-            # take the last layer's forward and backward
-            # forward hidden is h_n[-2], backward hidden is h_n[-1]
-            h_forward = h_n[-2]
-            h_backward = h_n[-1]
-            h_final = torch.cat((h_forward, h_backward), dim=1) # (batch, hidden_dim*2)
-        else:
-            h_final = h_n[-1]
+        h_final = h_n[-1]
 
         out = self.dropout(h_final)
         logits = self.fc(out)
