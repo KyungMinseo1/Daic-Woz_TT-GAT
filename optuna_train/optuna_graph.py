@@ -596,16 +596,16 @@ def main():
                       help="Write the path of temporary directory when using colab. (Transcription/Vision/Audio)")
   parser.add_argument('--mode', type=str, default=None,
                       help="Model for optuna ['multimodal_bilstm', 'multimodal_proxy', 'multimodal_topic_bilstm', 'multimodal_topic_bilstm_proxy', 'multimodal_topic_proxy']")
-  parser.add_argument('--tt_connect', type=bool, default=False,
+  parser.add_argument('--tt_connect', action='store_true',
                       help="Text to text connection.")
   parser.add_argument('--version', type=int, default=1,
                       help="GATClassifier version.")
-  parser.add_argument('--explanation', type=bool, default=False,
+  parser.add_argument('--explanation', action='store_true',
                       help="Use GATClassifier/dataset of Explanation version.")
-  parser.add_argument('--use_scaler', type=bool, default=False,
+  parser.add_argument('--use_scaler', action='store_true',
                       help="Using Gradiant Scaler (gradient can explode to Nan or Inf when turned on).")
-  parser.add_argument('--bidirectional', type=bool, default=False,
-                      help="Whether using Bidirectional LSTM or Non-Bidirectional LSTM.")
+  parser.add_argument('--bidirectional', action='store_true',
+                      help="Whether using Bidirectional LSTM")
     
   opt = parser.parse_args()
   logger.info(opt)
