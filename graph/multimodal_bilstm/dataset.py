@@ -6,6 +6,8 @@ import numpy as np
 import torch
 from tqdm import tqdm
 from loguru import logger
+
+import torch.nn.functional as F
 from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
 from .._multimodal_model_bilstm.GAT import GATClassifier
@@ -14,6 +16,8 @@ from torch_geometric.utils import to_networkx
 import matplotlib.patches as mpatches
 import networkx as nx
 from sklearn.preprocessing import StandardScaler, RobustScaler
+
+from ..preprocessing import process_transcription, process_audio, process_vision
 
 plt.rcParams['font.family'] ='Malgun Gothic'
 plt.rcParams['axes.unicode_minus'] =False
@@ -25,32 +29,16 @@ logger.add(
   format="<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | <level>{message}</level>",
 )
 
-MAX_SEQ_LEN_VISION = 300
-MAX_SEQ_LEN_AUDIO = 300
+MAX_SEQ_LEN_VISION = 150
+MAX_SEQ_LEN_AUDIO = 150
 
 kor_to_eng_dict = {
   "심리 상태 및 감정": "Psychological State and Emotional Well-being", 
-  "개인 특성 및 경험": "Personal Traits and Life Experiences",
-  "생활 환경 및 취미": "Living Conditions and Lifestyle Interests",
+  "개인 특성 및 취미": "Personal Traits and Life Experiences",
+  "생활 환경": "Living Conditions and Lifestyle Interests",
   "경력, 교육 및 군 복무": "Career, Education, and Military Service History",
   "대인 관계 및 가족": "Interpersonal Relationships and Family Dynamics"
 }
-
-def process_vision(df):
-  timestamp = df.timestamp
-  ft_x = df.filter(like='ftx')
-  ft_y = df.filter(like='fty')
-  # au_r = df.filter(like='au').filter(like='_r')
-  gz_df = df.filter(like='gz')
-  gz_h = gz_df.filter(like='h')
-  ps_t = df.filter(like='ps').filter(like='T')
-  ps_r = df.filter(like='ps').filter(like='R')
-  features = pd.concat([ft_x, ft_y, gz_h, ps_t, ps_r], axis=1)
-  if features.shape[1] == 0:
-    logger.warning("No vision features found! Adding a dummy feature.")
-    features['dummy_feature'] = 0.0
-  vision = pd.concat([timestamp, features], axis=1)
-  return vision
 
 def pad_sequence_numpy(seq, max_len):
   seq_len = len(seq)
@@ -66,6 +54,16 @@ def pad_sequence_numpy(seq, max_len):
 def make_graph(ids, labels, model_name, colab_path=None, use_summary_node=True, t_t_connect=True, v_a_connect=False, visualization=False):
   try:
     finish_utterance = ["asked everything", "asked_everything", "it was great chatting with you"]
+    EXCLUDED_SESSIONS = ['342', '394', '398', '460']
+    INTERRUPTED_SESSIONS = ['373', '444']
+    NO_ALLIE = ['458', '451', '480']
+    blacklist = EXCLUDED_SESSIONS + INTERRUPTED_SESSIONS + NO_ALLIE
+
+    filtered_data = [(id, label) for id, label in zip(ids, labels) if str(id) not in blacklist]
+    if len(filtered_data) < len(ids):
+      logger.warning(f"Filtered out {len(ids) - len(filtered_data)} sessions from blacklist")
+
+    filtered_ids, filtered_labels = zip(*filtered_data) if filtered_data else ([], [])
 
     logger.info("Getting your model")
     model = SentenceTransformer(model_name)
@@ -83,21 +81,18 @@ def make_graph(ids, labels, model_name, colab_path=None, use_summary_node=True, 
     if colab_path is not None:
       logger.info(f"Using Colab Path: {colab_path}")
 
-    for graph_idx, id in tqdm(enumerate(ids), desc="Dataframe -> Graph", total=len(ids)):
+    for graph_idx, id in tqdm(enumerate(filtered_ids), desc="Dataframe -> Graph", total=len(ids)):
       if colab_path is not None:
-        df = pd.read_csv(os.path.join(colab_path, 'Transcription Topic', f"{id}_transcript_topic.csv"))
+        df = pd.read_csv(os.path.join(colab_path, 'Transcription Topic 2', f"{id}_transcript_topic.csv"))
         v_df = pd.read_csv(os.path.join(colab_path, 'Vision Summary', f"{id}_vision_summary.csv"))
         a_df = pd.read_csv(os.path.join(colab_path, 'Audio Summary', f"{id}_audio_summary.csv"))
         
       else:
-        df = pd.read_csv(os.path.join(path_config.DATA_DIR, 'Transcription Topic', f"{id}_transcript_topic.csv"))
+        df = pd.read_csv(os.path.join(path_config.DATA_DIR, 'Transcription Topic 2', f"{id}_transcript_topic.csv"))
         v_df = pd.read_csv(os.path.join(path_config.DATA_DIR, 'Vision Summary', f"{id}_vision_summary.csv"))
         a_df = pd.read_csv(os.path.join(path_config.DATA_DIR, 'Audio Summary', f"{id}_audio_summary.csv"))
     
       try:
-        utterances = []
-        start_stop_list = []
-
         df.topic = df.topic.ffill()
         df = df.reset_index()
         search_pattern = '|'.join(finish_utterance)
@@ -105,10 +100,11 @@ def make_graph(ids, labels, model_name, colab_path=None, use_summary_node=True, 
         terminate_index = df.index[condition]
         if not terminate_index.empty:
           df = df.iloc[:terminate_index.values[0]]
-        participant_df = df[df.speaker=='Participant']
+        
+        utterances, topics, start_stop_list, start_stop_list_ellie = process_transcription(df)
 
        # Vision Scaling
-        vision_df = process_vision(v_df)
+        vision_df = process_vision(v_df, start_stop_list_ellie)
         vision_df = vision_df.replace([np.inf, -np.inf], np.nan).fillna(0)      
         # vision_timestamps = vision_df['timestamp'].values
         # vision_df = vision_df.drop(columns=['timestamp'])
@@ -117,42 +113,14 @@ def make_graph(ids, labels, model_name, colab_path=None, use_summary_node=True, 
         # vision_df['timestamp'] = vision_timestamps
 
         # Audio Scaling
-        audio_df = a_df.replace([np.inf, -np.inf], np.nan).fillna(0)
+        audio_df = process_audio(a_df, start_stop_list_ellie)
+        audio_df = audio_df.replace([np.inf, -np.inf], np.nan).fillna(0)
         if audio_df.shape[1] == 0:
           logger.warning("No audio features found! Adding a dummy feature.")
           audio_df['dummy_audio'] = 0.0
         # elif audio_df.shape[1] > 0:
           # audio_values = a_scaler.fit_transform(audio_df.values)
           # audio_df = pd.DataFrame(audio_values, columns=audio_df.columns)
-
-        previous_index = None
-        temp = ""
-        start_time = 0
-        stop_time = 0
-
-        for idx, row in participant_df.iterrows():
-          value = row['value']
-          value_str = str(value) if not pd.isna(value) else ""
-
-          # 연속 여부 판단
-          # 기존 인덱스를 그대로 유지함으로써 연속 여부 판단 가능
-          if previous_index == row['index']-1:
-            temp += value_str + ". "
-            stop_time = row.stop_time
-          else:
-            if temp != "":
-              utterances.append(temp)
-              start_stop_list.append([start_time, stop_time])
-            temp = value_str
-            start_time = row.start_time
-            stop_time = row.stop_time
-
-          previous_index = row['index']
-
-        # 마지막 값 저장
-        if temp!="":
-          utterances.append(temp)
-          start_stop_list.append([start_time, stop_time])
           
         transcription_list = []
         vision_seq_list = [] # Vision LSTM
@@ -205,12 +173,22 @@ def make_graph(ids, labels, model_name, colab_path=None, use_summary_node=True, 
           global_prev_t_node_id = t_node_id
 
           # Vision Node
-          v_target = vision_df.loc[(start <= vision_df['timestamp']) & (vision_df['timestamp'] <= stop)]
-          if len(v_target) > 0:
-            v_seq = v_target.drop(columns=['timestamp']).values
-            actual_v_len = min(len(v_seq), MAX_SEQ_LEN_VISION)
+          v_seq = vision_df.loc[(start <= vision_df['timestamp']) & (vision_df['timestamp'] <= stop)]
+          v_target = v_seq.drop(columns=['timestamp']).values
 
-            v_seq_padded = pad_sequence_numpy(v_seq, MAX_SEQ_LEN_VISION) # [Seq, Dim]
+          v_tensor = torch.FloatTensor(v_target).T.unsqueeze(0)
+
+          if v_tensor.size(-1) >= 3:
+            downsampled_v_tensor = F.avg_pool1d(v_tensor, kernel_size=3) # 0.1 second downsampling
+          else:
+            downsampled_v_tensor = v_tensor
+
+          downsampled_v_target = downsampled_v_tensor.squeeze(0).T.numpy()
+
+          if len(downsampled_v_target) > 0:
+            actual_v_len = min(len(downsampled_v_target), MAX_SEQ_LEN_VISION)
+
+            v_seq_padded = pad_sequence_numpy(downsampled_v_target, MAX_SEQ_LEN_VISION) # [Seq, Dim]
             vision_seq_list.append(v_seq_padded)
             vision_lengths_list.append(actual_v_len) # 길이 저장
 
@@ -225,12 +203,22 @@ def make_graph(ids, labels, model_name, colab_path=None, use_summary_node=True, 
           # Audio Node
           start_idx = int(start*100)
           stop_idx = int(stop*100) + 1
-          a_target = audio_df.iloc[start_idx:stop_idx].values
+          a_seq = audio_df[(start_idx <= audio_df['index']) & (audio_df['index'] <= stop_idx)]
+          a_target = a_seq.drop(['index'], axis=1).values
 
-          if len(a_target)>0:
-            actual_a_len = min(len(a_target), MAX_SEQ_LEN_AUDIO)
+          a_tensor = torch.FloatTensor(a_target).T.unsqueeze(0)
 
-            a_seq_padded = pad_sequence_numpy(a_target, MAX_SEQ_LEN_AUDIO)
+          if a_tensor.size(-1) >= 10:
+            downsampled_a_tensor = F.avg_pool1d(a_tensor, kernel_size=10) # 1 second downsampling
+          else:
+            downsampled_a_tensor = a_tensor
+
+          downsampled_a_target = downsampled_a_tensor.squeeze(0).T.numpy()
+
+          if len(downsampled_a_target)>0:
+            actual_a_len = min(len(downsampled_a_target), MAX_SEQ_LEN_AUDIO)
+
+            a_seq_padded = pad_sequence_numpy(downsampled_a_target, MAX_SEQ_LEN_AUDIO)
             audio_seq_list.append(a_seq_padded)
             audio_lengths_list.append(actual_a_len) # 길이 저장
 
@@ -264,6 +252,15 @@ def make_graph(ids, labels, model_name, colab_path=None, use_summary_node=True, 
         # fill static features
         text_indices = [i for i, nt in enumerate(node_types) if nt in ['summary', 'transcription']]
         x[text_indices] = torch.tensor(static_features, dtype=torch.float)
+
+        # Vision/Audio 노드를 1.0으로 초기화 (GNNExplainer를 위한 스위치 역할)
+        vision_indices = [i for i, nt in enumerate(node_types) if nt == 'vision']
+        audio_indices = [i for i, nt in enumerate(node_types) if nt == 'audio']
+
+        if vision_indices:
+          x[vision_indices] = 1.0
+        if audio_indices:
+          x[audio_indices] = 1.0
 
         # Vision
         vision_dim = len(vision_df.columns) - 1

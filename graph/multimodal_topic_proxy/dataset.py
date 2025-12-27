@@ -15,6 +15,8 @@ import matplotlib.patches as mpatches
 import networkx as nx
 from sklearn.preprocessing import StandardScaler, RobustScaler
 
+from ..preprocessing import process_transcription, process_audio, process_vision
+
 plt.rcParams['font.family'] ='Malgun Gothic'
 plt.rcParams['axes.unicode_minus'] =False
 
@@ -32,22 +34,6 @@ kor_to_eng_dict = {
   "경력, 교육 및 군 복무": "Career, Education, and Military Service History",
   "대인 관계 및 가족": "Interpersonal Relationships and Family Dynamics"
 }
-
-def process_vision(df):
-  timestamp = df.timestamp
-  ft_x = df.filter(like='ftx')
-  ft_y = df.filter(like='fty')
-  # au_r = df.filter(like='au').filter(like='_r')
-  gz_df = df.filter(like='gz')
-  gz_h = gz_df.filter(like='h')
-  ps_t = df.filter(like='ps').filter(like='T')
-  ps_r = df.filter(like='ps').filter(like='R')
-  features = pd.concat([ft_x, ft_y, gz_h, ps_t, ps_r], axis=1)
-  if features.shape[1] == 0:
-    logger.warning("No vision features found! Adding a dummy feature.")
-    features['dummy_feature'] = 0.0
-  vision = pd.concat([timestamp, features], axis=1)
-  return vision
 
 def make_graph(ids, labels, model_name, colab_path=None, use_summary_node=True, t_t_connect=False, v_a_connect=False, visualization=False, explanation=False):
   try:
@@ -91,10 +77,6 @@ def make_graph(ids, labels, model_name, colab_path=None, use_summary_node=True, 
         a_df = pd.read_csv(os.path.join(path_config.DATA_DIR, 'Audio Summary', f"{id}_audio_summary.csv"))
     
       try:
-        utterances = []
-        topics = []
-        start_stop_list = []
-        
         df.topic = df.topic.ffill()
         df = df.reset_index()
         search_pattern = '|'.join(finish_utterance)
@@ -102,10 +84,11 @@ def make_graph(ids, labels, model_name, colab_path=None, use_summary_node=True, 
         terminate_index = df.index[condition]
         if not terminate_index.empty:
           df = df.iloc[:terminate_index.values[0]]
-        participant_df = df[df.speaker=='Participant']
+        
+        utterances, topics, start_stop_list, start_stop_list_ellie = process_transcription(df)
 
         # Vision Scaling
-        vision_df = process_vision(v_df)
+        vision_df = process_vision(v_df, start_stop_list_ellie)
         vision_df = vision_df.replace([np.inf, -np.inf], np.nan).fillna(0)      
         # vision_timestamps = vision_df['timestamp'].values
         # vision_df = vision_df.drop(columns=['timestamp'])
@@ -114,47 +97,14 @@ def make_graph(ids, labels, model_name, colab_path=None, use_summary_node=True, 
         # vision_df['timestamp'] = vision_timestamps
 
         # Audio Scaling
-        audio_df = a_df.replace([np.inf, -np.inf], np.nan).fillna(0)
+        audio_df = process_audio(a_df, start_stop_list_ellie)
+        audio_df = audio_df.replace([np.inf, -np.inf], np.nan).fillna(0)
         if audio_df.shape[1] == 0:
           logger.warning("No audio features found! Adding a dummy feature.")
           audio_df['dummy_audio'] = 0.0
         # elif audio_df.shape[1] > 0:
           # audio_values = a_scaler.fit_transform(audio_df.values)
           # audio_df = pd.DataFrame(audio_values, columns=audio_df.columns)
-
-        previous_index = None
-        previous_topic = None
-        temp = ""
-        start_time = 0
-        stop_time = 0
-
-        for idx, row in participant_df.iterrows():
-          value = row['value']
-          value_str = str(value) if not pd.isna(value) else ""
-
-          # 연속 여부 판단
-          # 기존 인덱스를 그대로 유지함으로써 연속 여부 판단 가능 + 주제 별 연속 여부도 판단
-          if previous_index == row['index']-1 and previous_topic==row.topic:
-            temp += value_str + ". "
-            stop_time = row.stop_time
-          else:
-            if temp != "" and not pd.isna(previous_topic):
-              # 이전 것을 저장
-              utterances.append(temp)
-              topics.append(previous_topic)
-              start_stop_list.append([start_time, stop_time])
-            previous_topic = row.topic
-            temp = value_str
-            start_time = row.start_time
-            stop_time = row.stop_time
-
-          previous_index = row['index']
-
-        # 마지막 값 저장
-        if temp!="" and not pd.isna(previous_topic):
-          utterances.append(temp)
-          topics.append(previous_topic)
-          start_stop_list.append([start_time, stop_time])
 
         # Topic/Summary nodes
         unique_topics = np.unique(np.array(topics))
@@ -242,10 +192,11 @@ def make_graph(ids, labels, model_name, colab_path=None, use_summary_node=True, 
           global_prev_t_node_id = t_node_id
 
           # Vision Node
-          v_target = vision_df.loc[(start <= vision_df['timestamp']) & (vision_df['timestamp'] <= stop)]
+          v_seq = vision_df.loc[(start <= vision_df['timestamp']) & (vision_df['timestamp'] <= stop)]
+          v_target = v_seq.drop(columns=['timestamp']).values
+
           if len(v_target) > 0:
-            v_vals = v_target.drop(columns=['timestamp']).values
-            v_pooled = np.mean(v_vals, axis=0) # [Dim,]
+            v_pooled = np.mean(v_target, axis=0) # [Dim,]
             vision_pooled_list.append(v_pooled)
 
             v_node_id = current_node_idx
@@ -259,7 +210,8 @@ def make_graph(ids, labels, model_name, colab_path=None, use_summary_node=True, 
           # Audio Node
           start_idx = int(start*100)
           stop_idx = int(stop*100) + 1
-          a_target = audio_df.iloc[start_idx:stop_idx].values
+          a_seq = audio_df[(start_idx <= audio_df['index']) & (audio_df['index'] <= stop_idx)]
+          a_target = a_seq.drop(['index'], axis=1).values
 
           if len(a_target)>0:
             a_pooled = np.mean(a_target, axis=0) # [Dim,]
@@ -297,6 +249,15 @@ def make_graph(ids, labels, model_name, colab_path=None, use_summary_node=True, 
         # fill static features
         text_indices = [i for i, nt in enumerate(node_types) if nt not in ['vision', 'audio']]
         x[text_indices] = torch.tensor(static_features, dtype=torch.float)
+        
+        # Vision/Audio 노드를 1.0으로 초기화 (GNNExplainer를 위한 스위치 역할)
+        vision_indices = [i for i, nt in enumerate(node_types) if nt == 'vision']
+        audio_indices = [i for i, nt in enumerate(node_types) if nt == 'audio']
+
+        if vision_indices:
+          x[vision_indices] = 1.0
+        if audio_indices:
+          x[audio_indices] = 1.0
 
         # Vision
         if len(vision_pooled_list) > 0:
