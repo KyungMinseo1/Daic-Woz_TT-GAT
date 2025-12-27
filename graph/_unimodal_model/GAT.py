@@ -222,9 +222,11 @@ class GATClassifier(nn.Module):
         node_types = data.node_types
 
         if self.use_text_proj:
-            x = self.text_proj(x)
+            x_proj = self.text_proj(x)
+        else:
+            x_proj = x
 
-        text_features = self.dropout_text(x) # (N_total, Hidden)
+        text_features = self.dropout_text(x_proj)
         final_x = text_features.clone()
 
         flat_node_types = []
@@ -391,8 +393,12 @@ class GATJKClassifier(nn.Module):
         node_types = data.node_types
 
         if self.use_text_proj:
-            x = self.text_proj(x)
-        x = self.dropout_text(x)
+            x_proj = self.text_proj(x)
+        else:
+            x_proj = x
+
+        text_features = self.dropout_text(x_proj)
+        final_x = text_features.clone()
 
         xs = []
 
@@ -403,7 +409,7 @@ class GATJKClassifier(nn.Module):
             flat_node_types = node_types
 
         # GAT 레이어 1
-        x = F.dropout(x, p=self.dropout_g, training=self.training)
+        x = F.dropout(final_x, p=self.dropout_g, training=self.training)
         x = self.conv1(x, edge_index)
         x = self.norm1(x, batch)
         x = F.elu(x)

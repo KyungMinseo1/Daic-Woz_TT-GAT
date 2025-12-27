@@ -254,9 +254,11 @@ class GATClassifier(nn.Module):
         vision_lengths = data.vision_lengths
 
         if self.use_text_proj:
-            x = self.text_proj(x)
+            x_proj = self.text_proj(x)
+        else:
+            x_proj = x
 
-        text_features = self.dropout_text(x) # (N_total, Hidden)
+        text_features = self.dropout_text(x_proj)
         final_x = text_features.clone()
 
         flat_node_types = []
@@ -271,7 +273,9 @@ class GATClassifier(nn.Module):
         if x_vision.size(0) > 0 and len(vision_indices) > 0:
             h_vision, _ = self.vision_lstm(x_vision, vision_lengths) # (N, Hidden)
             if len(vision_indices) == h_vision.size(0):
-                final_x[vision_indices] = h_vision.to(x.dtype)
+                mask_weight = x[vision_indices].mean(dim=1, keepdim=True)
+                weighted_vision = h_vision.to(final_x.dtype) * mask_weight.to(final_x.dtype)
+                final_x[vision_indices] = weighted_vision
         
         # GAT 레이어 1
         x = F.dropout(final_x, p=self.dropout_g, training=self.training)
@@ -464,8 +468,12 @@ class GATJKClassifier(nn.Module):
         vision_lengths = data.vision_lengths
 
         if self.use_text_proj:
-            x = self.text_proj(x)
-        x = self.dropout_text(x)
+            x_proj = self.text_proj(x)
+        else:
+            x_proj = x
+
+        text_features = self.dropout_text(x_proj)
+        final_x = text_features.clone()
 
         flat_node_types = []
         if isinstance(node_types[0], list):
@@ -479,12 +487,14 @@ class GATJKClassifier(nn.Module):
         if x_vision.size(0) > 0 and len(vision_indices) > 0:
             h_vision, _ = self.vision_lstm(x_vision, vision_lengths) # (N, Hidden)
             if len(vision_indices) == h_vision.size(0):
-                x[vision_indices] = h_vision.to(x.dtype)
+                mask_weight = x[vision_indices].mean(dim=1, keepdim=True)
+                weighted_vision = h_vision.to(final_x.dtype) * mask_weight.to(final_x.dtype)
+                final_x[vision_indices] = weighted_vision
 
         xs = []
         
         # GAT 레이어 1
-        x = F.dropout(x, p=self.dropout_g, training=self.training)
+        x = F.dropout(final_x, p=self.dropout_g, training=self.training)
         x = self.conv1(x, edge_index)
         x = self.norm1(x, batch)
         x = F.elu(x)
