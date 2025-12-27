@@ -70,12 +70,16 @@ def train_gat(train_loader, model, criterion, optimizer, device, mode='multimoda
       continue
     
     if mode=='multimodal':
-      if torch.isnan(batch.x_vision).any() or torch.isinf(batch.x_vision).any():
-        logger.error(f"Batch {idx}: Input features (batch.x_vision) contain NaN or Inf! Aborting batch.")
-        continue
-      if torch.isnan(batch.x_audio).any() or torch.isinf(batch.x_audio).any():
-        logger.error(f"Batch {idx}: Input features (batch.x_audio) contain NaN or Inf! Aborting batch.")
-        continue
+      if hasattr(batch, 'x_vision') and batch.x_vision is not None and batch.x_vision.numel() > 0:
+          if torch.isnan(batch.x_vision).any() or torch.isinf(batch.x_vision).any():
+            logger.error(f"Batch {idx}: Input features (batch.x_vision) contain NaN or Inf! Aborting batch.")
+            continue
+        
+        # Audio 체크: 속성이 있고, None이 아닐 때만 검사
+      if hasattr(batch, 'x_audio') and batch.x_audio is not None and batch.x_audio.numel() > 0:
+          if torch.isnan(batch.x_audio).any() or torch.isinf(batch.x_audio).any():
+            logger.error(f"Batch {idx}: Input features (batch.x_audio) contain NaN or Inf! Aborting batch.")
+            continue
 
     optimizer.zero_grad()
     

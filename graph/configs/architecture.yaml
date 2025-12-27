@@ -20,3 +20,7 @@ model:
   use_attention: True
   use_summary_node: False
   use_text_proj: True
+
+  use_text: True
+  use_audio: True
+  use_vision: False 
