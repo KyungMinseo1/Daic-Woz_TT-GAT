@@ -74,8 +74,8 @@ def make_graph(
   :param explanation: Whether you want to use GNNExplainer or analyze specifically on the model
   """
   try:
-    MAX_SEQ_LEN_VISION = time_interval * 50   # 1 data for vision = 0.0333 seconds
-    MAX_SEQ_LEN_AUDIO = time_interval * 150    # 1 data for audio = 0.01 seconds
+    MAX_SEQ_LEN_VISION = time_interval * 30   # 1 data for vision = 0.0333 seconds
+    MAX_SEQ_LEN_AUDIO = time_interval * 40    # 1 data for audio = 0.01 seconds -> with max_pooling(kernel_size=3), 1 data = 0.3 seconds
 
     finish_utterance = ["asked everything", "asked_everything", "it was great chatting with you"]
     EXCLUDED_SESSIONS = ['342', '394', '398', '460']
@@ -268,13 +268,16 @@ def make_graph(
 
           # downsampled_a_target = downsampled_a_tensor.squeeze(0).permute(1,0).cpu().numpy()
 
-          # if len(downsampled_a_target)>0:
-          #   actual_a_len = min(len(downsampled_a_target), MAX_SEQ_LEN_AUDIO)
-          if len(a_target)>0:
-            actual_a_len = min(len(a_target), MAX_SEQ_LEN_AUDIO)
+          # down sampling
+          downsampled_a_target = a_target[::3]
 
-            # a_seq_padded = pad_sequence_numpy(downsampled_a_target, MAX_SEQ_LEN_AUDIO)
-            a_seq_padded = pad_sequence_numpy(a_target, MAX_SEQ_LEN_AUDIO)
+          if len(downsampled_a_target)>0:
+            actual_a_len = min(len(downsampled_a_target), MAX_SEQ_LEN_AUDIO)
+          # if len(a_target)>0:
+          #   actual_a_len = min(len(a_target), MAX_SEQ_LEN_AUDIO)
+
+            a_seq_padded = pad_sequence_numpy(downsampled_a_target, MAX_SEQ_LEN_AUDIO)
+            # a_seq_padded = pad_sequence_numpy(a_target, MAX_SEQ_LEN_AUDIO)
             audio_seq_list.append(a_seq_padded)
             audio_lengths_list.append(actual_a_len) # 길이 저장
 
