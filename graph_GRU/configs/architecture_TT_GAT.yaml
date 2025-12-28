@@ -1,6 +1,6 @@
 training:
-  lr: 0.00003
-  weight-decay: 0.00042
+  lr: 0.00005
+  weight-decay: 0.001
   bs: 4
   scheduler: 'reducelr'
   warmup_epoch: 5
@@ -13,13 +13,13 @@ training:
 
 model:
   h_dim: 256
-  head: 4
+  head: 8
   num_layers: 3
   gru_num_layers: 2
-  t_dropout: 0.25
-  g_dropout: 0.25
-  v_dropout: 0.35
-  a_dropout: 0.4
+  t_dropout: 0.3
+  g_dropout: 0.3
+  v_dropout: 0.3
+  a_dropout: 0.3
   use_attention: True
-  use_summary_node: True
-  use_text_proj: False
+  use_summary_node: False
+  use_text_proj: True
