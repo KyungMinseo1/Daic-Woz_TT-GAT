@@ -525,7 +525,7 @@ def main():
   parser = argparse.ArgumentParser()
   parser.add_argument('--num_epochs', default=100, type=int,
                       help='Number of training epochs.')
-  parser.add_argument('--optuna_config', type=str, default='optuna_search_grid.yaml',
+  parser.add_argument('--optuna_config', type=str, default='optuna_search_grid_gru.yaml',
                       help="Which optuna configuration to use. See into 'config' folder.")
   # If you want to resume, just put in the original directory path with study SQlite DB.
   parser.add_argument('--save_dir', type=str, default='checkpoints', metavar='PATH',
@@ -717,8 +717,8 @@ if __name__=="__main__":
   main()
 
 # Example for multimodal_proxy
-#   -> python optuna_train/optuna_graph.py --mode multimodal_proxy --num_epochs 300 --patience 30 --save_dir checkpoints_optuna --save_dir_ multimodal_proxy
+#   -> python optuna_train/optuna_graph_gru.py --mode multimodal_proxy --num_epochs 300 --patience 30 --save_dir checkpoints_optuna --save_dir_ multimodal_proxy
 # Example for multimodal_proxy_v2
-# -> python optuna_train/optuna_graph.py --mode multimodal_proxy --num_epochs 300 --patience 30 --save_dir checkpoints_optuna --save_dir_ multimodal_proxy_v2 --version 2
+# -> python optuna_train/optuna_graph_gru.py --mode multimodal_proxy --num_epochs 300 --patience 30 --save_dir checkpoints_optuna --save_dir_ multimodal_proxy_v2 --version 2
 # Example for multimodal_topic_bilstm_v2 (recommend using gradscaler when using bilstm)
-# -> python optuna_train/optuna_graph.py --mode multimodal_topic_bilstm --num_epochs 300 --patience 30 --save_dir checkpoints_optuna --save_dir_ multimodal_topic_bilstm_v2 --version 2 --use_scaler True
+# -> python optuna_train/optuna_graph_gru.py --mode multimodal_topic_bilstm --num_epochs 300 --patience 30 --save_dir checkpoints_optuna --save_dir_ multimodal_topic_bilstm_v2 --version 2 --use_scaler True
