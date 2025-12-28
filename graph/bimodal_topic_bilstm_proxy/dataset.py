@@ -29,8 +29,6 @@ logger.add(
   format="<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | <level>{message}</level>",
 )
 
-MAX_SEQ_LEN_VISION = 300
-
 kor_to_eng_dict = {
   "심리 상태 및 감정": "Psychological State and Emotional Well-being", 
   "개인 특성 및 경험": "Personal Traits and Life Experiences",
@@ -49,8 +47,36 @@ def pad_sequence_numpy(seq, max_len):
     padding = np.zeros((max_len - seq_len, feature_dim))
     return np.vstack([seq, padding])
 
-def make_graph(ids, labels, model_name, colab_path=None, use_summary_node=True, t_t_connect=False, visualization=False, explanation=False):
+# v_a_connect has no effect on bimodal make_graph since there is no audio node 
+def make_graph(
+    ids,
+    labels,
+    model_name,
+    time_interval,
+    colab_path=None,
+    use_summary_node=True,
+    t_t_connect=False,
+    v_a_connect=False,
+    visualization=False,
+    explanation=False
+  ):
+  """
+  make_graph's Docstring
+  
+  :param ids: List of patient ids
+  :param labels: List of depression labels
+  :param model_name: Language model name(HuggingFace)
+  :param time_interval: Time interval for seperating node (unit: second)
+  :param colab_path: Write your colab dataset path if you're using colab
+  :param use_summary_node: Whether you want to use summary node (else, the model will do pooling with topic nodes)
+  :param t_t_connect: Whether you want to connect text to text nodes regarding their temporal relationship
+  :param v_a_connect: Whether you want to connect vision to audio (or audio to vision) for aligning two multimodalities
+  :param visualization: Whether you want to visualize the graph construction (for a simple image, data is partially sampled)
+  :param explanation: Whether you want to use GNNExplainer or analyze specifically on the model
+  """
   try:
+    MAX_SEQ_LEN_VISION = time_interval * 30   # 1 data for vision = 0.333 seconds
+
     finish_utterance = ["asked everything", "asked_everything", "it was great chatting with you"]
     EXCLUDED_SESSIONS = ['342', '394', '398', '460']
     INTERRUPTED_SESSIONS = ['373', '444']
@@ -95,7 +121,7 @@ def make_graph(ids, labels, model_name, colab_path=None, use_summary_node=True, 
         if not terminate_index.empty:
           df = df.iloc[:terminate_index.values[0]]
         
-        utterances, topics, start_stop_list, start_stop_list_ellie = process_transcription(df)
+        utterances, topics, start_stop_list, start_stop_list_ellie = process_transcription(df, time_interval)
 
         # Vision Scaling
         vision_df = process_vision(v_df, start_stop_list_ellie)
@@ -299,6 +325,7 @@ if __name__=="__main__":
   train_graphs, (t_dim, v_dim) = make_graph(
     ids = train_id,
     labels = train_label,
+    time_interval=10,
     model_name='sentence-transformers/all-MiniLM-L6-v2',
     use_summary_node=True,
     visualization=True)

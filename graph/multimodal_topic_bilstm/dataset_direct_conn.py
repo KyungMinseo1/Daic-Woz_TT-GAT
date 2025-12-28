@@ -6,9 +6,11 @@ import numpy as np
 import torch
 from tqdm import tqdm
 from loguru import logger
+
+import torch.nn.functional as F
 from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
-from .._multimodal_model_no_bilstm.GAT import GATClassifier
+from .._multimodal_model_bilstm.GAT import GATClassifier
 import matplotlib.pyplot as plt
 from torch_geometric.utils import to_networkx
 import matplotlib.patches as mpatches
@@ -29,11 +31,21 @@ logger.add(
 
 kor_to_eng_dict = {
   "심리 상태 및 감정": "Psychological State and Emotional Well-being", 
-  "개인 특성 및 경험": "Personal Traits and Life Experiences",
-  "생활 환경 및 취미": "Living Conditions and Lifestyle Interests",
+  "개인 특성 및 취미": "Personal Traits and Life Experiences",
+  "생활 환경": "Living Conditions and Lifestyle Interests",
   "경력, 교육 및 군 복무": "Career, Education, and Military Service History",
   "대인 관계 및 가족": "Interpersonal Relationships and Family Dynamics"
 }
+
+def pad_sequence_numpy(seq, max_len):
+  seq_len = len(seq)
+  feature_dim = seq.shape[1]
+  
+  if seq_len >= max_len:
+    return seq[:max_len, :]
+  else:
+    padding = np.zeros((max_len - seq_len, feature_dim))
+    return np.vstack([seq, padding])
 
 def make_graph(
     ids,
@@ -62,6 +74,9 @@ def make_graph(
   :param explanation: Whether you want to use GNNExplainer or analyze specifically on the model
   """
   try:
+    MAX_SEQ_LEN_VISION = time_interval * 30   # 1 data for vision = 0.333 seconds
+    MAX_SEQ_LEN_AUDIO = time_interval * 40    # 1 data for audio = 0.01 seconds -> with avg_pooling(kernel_size=3), 1 data = 0.3 seconds
+
     finish_utterance = ["asked everything", "asked_everything", "it was great chatting with you"]
     EXCLUDED_SESSIONS = ['342', '394', '398', '460']
     INTERRUPTED_SESSIONS = ['373', '444']
@@ -83,7 +98,7 @@ def make_graph(
     # v_scaler = StandardScaler()
     # a_scaler = StandardScaler()
     # v_scaler = RobustScaler()
-    # a_sclaer = RobustScaler()
+    # a_scaler = RobustScaler()
     
     logger.info("Switching CSV into Graphs")
     
@@ -92,12 +107,12 @@ def make_graph(
 
     for graph_idx, id in tqdm(enumerate(filtered_ids), desc="Dataframe -> Graph", total=len(filtered_ids)):
       if colab_path is not None:
-        df = pd.read_csv(os.path.join(colab_path, 'Transcription Topic', f"{id}_transcript_topic.csv"))
+        df = pd.read_csv(os.path.join(colab_path, 'Transcription Topic 2', f"{id}_transcript_topic.csv"))
         v_df = pd.read_csv(os.path.join(colab_path, 'Vision Summary', f"{id}_vision_summary.csv"))
         a_df = pd.read_csv(os.path.join(colab_path, 'Audio Summary', f"{id}_audio_summary.csv"))
         
       else:
-        df = pd.read_csv(os.path.join(path_config.DATA_DIR, 'Transcription Topic', f"{id}_transcript_topic.csv"))
+        df = pd.read_csv(os.path.join(path_config.DATA_DIR, 'Transcription Topic 2', f"{id}_transcript_topic.csv"))
         v_df = pd.read_csv(os.path.join(path_config.DATA_DIR, 'Vision Summary', f"{id}_vision_summary.csv"))
         a_df = pd.read_csv(os.path.join(path_config.DATA_DIR, 'Audio Summary', f"{id}_audio_summary.csv"))
     
@@ -109,7 +124,7 @@ def make_graph(
         terminate_index = df.index[condition]
         if not terminate_index.empty:
           df = df.iloc[:terminate_index.values[0]]
-        
+
         utterances, topics, start_stop_list, start_stop_list_ellie = process_transcription(df, time_interval)
 
         # Vision Scaling
@@ -143,10 +158,10 @@ def make_graph(
           summary_node = np.average(topic_nodes, axis=0).reshape(1, -1)
 
         transcription_list = []
-        proxy_list = []
-
-        vision_pooled_list = []
-        audio_pooled_list = []
+        vision_seq_list = [] # Vision LSTM
+        audio_seq_list = []  # Audio LSTM
+        vision_lengths_list = []
+        audio_lengths_list = []
 
         node_types = []
         if use_summary_node:
@@ -175,7 +190,7 @@ def make_graph(
             target_nodes.append(target_idx)
             source_nodes.append(target_idx)
             target_nodes.append(source_idx)
-
+        
         global_prev_t_node_id = None
         # Text
         if visualization:
@@ -193,15 +208,11 @@ def make_graph(
           node_types.append('transcription')
           current_node_idx += 1
 
-          # Proxy Node
-          proxy_list.append(t_emb) 
-          p_node_id = current_node_idx
-          node_types.append('proxy')
-          current_node_idx += 1
-
-          # Text -> Topic
+          # Text <-> Topic
           source_nodes.append(t_node_id)
           target_nodes.append(start_offset + topic_node_id)
+          source_nodes.append(start_offset + topic_node_id)
+          target_nodes.append(t_node_id)
 
           # Text -> Text
           if global_prev_t_node_id is not None and t_t_connect:
@@ -210,10 +221,6 @@ def make_graph(
             source_nodes.append(t_node_id)
             target_nodes.append(global_prev_t_node_id)
 
-          # Proxy -> Text
-          source_nodes.append(p_node_id)
-          target_nodes.append(t_node_id)
-
           global_prev_t_node_id = t_node_id
 
           # Vision Node
@@ -221,16 +228,27 @@ def make_graph(
           v_target = v_seq.drop(columns=['timestamp']).values
 
           if len(v_target) > 0:
-            v_pooled = np.mean(v_target, axis=0) # [Dim,]
-            vision_pooled_list.append(v_pooled)
+            actual_v_len = min(len(v_target), MAX_SEQ_LEN_VISION)
+
+            v_seq_padded = pad_sequence_numpy(v_target, MAX_SEQ_LEN_VISION) # [Seq, Dim]
+            vision_seq_list.append(v_seq_padded)
+            vision_lengths_list.append(actual_v_len) # 길이 저장
 
             v_node_id = current_node_idx
             node_types.append('vision')
             current_node_idx += 1
 
-            # Vision -> Proxy
+            # Vision <-> Text
             source_nodes.append(v_node_id)
-            target_nodes.append(p_node_id)
+            target_nodes.append(t_node_id)
+            source_nodes.append(t_node_id)
+            target_nodes.append(v_node_id)
+
+            # Vision <-> Topic
+            source_nodes.append(v_node_id)
+            target_nodes.append(start_offset + topic_node_id)
+            source_nodes.append(start_offset + topic_node_id)
+            target_nodes.append(v_node_id)
 
           # Audio Node
           start_idx = int(start*100)
@@ -238,17 +256,37 @@ def make_graph(
           a_seq = audio_df[(start_idx <= audio_df['index']) & (audio_df['index'] <= stop_idx)]
           a_target = a_seq.drop(['index'], axis=1).values
 
-          if len(a_target)>0:
-            a_pooled = np.mean(a_target, axis=0) # [Dim,]
-            audio_pooled_list.append(a_pooled)
+          a_tensor = torch.FloatTensor(a_target).T.unsqueeze(0)
+
+          if len(a_tensor) >= 3:
+            downsampled_a_tensor = F.avg_pool1d(a_tensor, kernel_size=3)
+          else:
+            downsampled_a_tensor = a_tensor
+
+          downsampled_a_target = downsampled_a_tensor.T.squeeze(0).numpy()
+
+          if len(downsampled_a_target)>0:
+            actual_a_len = min(len(downsampled_a_target), MAX_SEQ_LEN_AUDIO)
+
+            a_seq_padded = pad_sequence_numpy(a_target, MAX_SEQ_LEN_AUDIO)
+            audio_seq_list.append(a_seq_padded)
+            audio_lengths_list.append(actual_a_len) # 길이 저장
 
             a_node_id = current_node_idx
             node_types.append('audio')
             current_node_idx += 1
 
-            # Audio -> Proxy
+            # Audio <-> Text
             source_nodes.append(a_node_id)
-            target_nodes.append(p_node_id)
+            target_nodes.append(t_node_id)
+            source_nodes.append(t_node_id)
+            target_nodes.append(a_node_id)
+
+            # Audio <-> Topic
+            source_nodes.append(a_node_id)
+            target_nodes.append(start_offset + topic_node_id)
+            source_nodes.append(start_offset + topic_node_id)
+            target_nodes.append(a_node_id)
           
           if (v_node_id and a_node_id) and v_node_id == a_node_id-1 and v_a_connect:
             source_nodes.append(v_node_id)
@@ -262,7 +300,6 @@ def make_graph(
           feature_parts.append(summary_node)
         feature_parts.append(topic_nodes)
         feature_parts.append(np.array(transcription_list))
-        feature_parts.append(np.array(proxy_list))
 
         static_features = np.concatenate(feature_parts, axis=0)
         text_dim = static_features.shape[1]
@@ -272,7 +309,7 @@ def make_graph(
         x = torch.zeros((total_num_nodes, text_dim), dtype=torch.float)
 
         # fill static features
-        text_indices = [i for i, nt in enumerate(node_types) if nt not in ['vision', 'audio']]
+        text_indices = [i for i, nt in enumerate(node_types) if nt in ['summary', 'topic', 'transcription']]
         x[text_indices] = torch.tensor(static_features, dtype=torch.float)
         
         # Vision/Audio 노드를 1.0으로 초기화 (GNNExplainer를 위한 스위치 역할)
@@ -285,16 +322,25 @@ def make_graph(
           x[audio_indices] = 1.0
 
         # Vision
-        if len(vision_pooled_list) > 0:
-          x_vision = torch.tensor(np.array(vision_pooled_list), dtype=torch.float)
+        vision_dim = len(vision_df.columns) - 1
+        if len(vision_seq_list) > 0:
+          vision_data_np = np.array(vision_seq_list)
+          x_vision = torch.tensor(vision_data_np, dtype=torch.float)
+          data_vision_lengths = torch.tensor(vision_lengths_list, dtype=torch.long)
         else:
-          x_vision = torch.empty((0, len(vision_df.columns)-1)) # Dummy dim
+          x_vision = torch.empty((0, MAX_SEQ_LEN_VISION, vision_dim))
+          data_vision_lengths = torch.tensor([], dtype=torch.long)
 
         # Audio
-        if len(audio_pooled_list) > 0:
-          x_audio = torch.tensor(np.array(audio_pooled_list), dtype=torch.float)
+        audio_dim = len(audio_df.columns)
+        if len(audio_seq_list) > 0:
+            audio_data_np = np.array(audio_seq_list)
+            # (N_audio, Seq_Len, Dim) 형태로 생성
+            x_audio = torch.tensor(audio_data_np, dtype=torch.float)
+            data_audio_lengths = torch.tensor(audio_lengths_list, dtype=torch.long)
         else:
-          x_audio = torch.empty((0, len(audio_df.columns)))
+            x_audio = torch.empty((0, MAX_SEQ_LEN_AUDIO, audio_dim))
+            data_audio_lengths = torch.tensor([], dtype=torch.long)
 
         edge_index = torch.tensor([source_nodes, target_nodes], dtype=torch.long)
         y = torch.tensor([filtered_labels[graph_idx]], dtype=torch.long)
@@ -302,11 +348,13 @@ def make_graph(
         data = Data(x=x, edge_index=edge_index, y=y, node_types=node_types)
         data.x_vision = x_vision
         data.x_audio = x_audio
+        data.vision_lengths = data_vision_lengths
+        data.audio_lengths = data_audio_lengths
 
         graphs.append(data)
 
       except Exception as e:
-        logger.error(f"Index:{graph_idx}: {e}")
+        logger.error(f"Index: {graph_idx}, Id: {id}, Error: {e}")
         import traceback; traceback.print_exc()
 
     if len(graphs) > 0:
@@ -352,8 +400,9 @@ if __name__=="__main__":
     time_interval=10,
     model_name='sentence-transformers/all-MiniLM-L6-v2',
     use_summary_node=True,
-    v_a_connect=False,
-    visualization=True)
+    v_a_connect=True,
+    visualization=True,
+  )
   logger.info(f"Transcription dim: {t_dim}")
   logger.info(f"Vision dim: {v_dim}")
   logger.info(f"Audio dim: {a_dim}")
@@ -417,6 +466,7 @@ if __name__=="__main__":
       hidden_channels=256,
       num_layers=3,
       num_classes=2,
+      bilstm_num_layers=2,
       dropout_dict={
           'text_dropout': 0.3,
           'graph_dropout': 0.2,
@@ -424,6 +474,7 @@ if __name__=="__main__":
           'audio_dropout': 0.4
       },
       heads=8,
+      use_attention=False,
       use_summary_node=True
   ).to(device)
   logger.info("Loader/Model Ready")
@@ -450,7 +501,6 @@ if __name__=="__main__":
     'summary': '#FF6B6B',      # 빨강
     'topic': '#4ECDC4',        # 청록
     'transcription': '#45B7D1', # 파랑
-    'proxy': '#D3D3D3',        # 회색
     'vision': '#FFA07A',       # 주황
     'audio': '#98D8C8'         # 민트
   }
@@ -490,12 +540,11 @@ if __name__=="__main__":
         )
 
   legend_elements = [
-    mpatches.Patch(color=color_map['summary'], label='Summary'),
-    mpatches.Patch(color=color_map['topic'], label='Topic'),
-    mpatches.Patch(color=color_map['transcription'], label='Transcription'),
-    mpatches.Patch(color=color_map['proxy'], label='Proxy'), # NEW
-    mpatches.Patch(color=color_map['vision'], label='Vision'),
-    mpatches.Patch(color=color_map['audio'], label='Audio')
+      mpatches.Patch(color=color_map['summary'], label='Summary'),
+      mpatches.Patch(color=color_map['topic'], label='Topic'),
+      mpatches.Patch(color=color_map['transcription'], label='Transcription'),
+      mpatches.Patch(color=color_map['vision'], label='Vision'),
+      mpatches.Patch(color=color_map['audio'], label='Audio')
   ]
   plt.legend(handles=legend_elements, loc='upper right')
 
