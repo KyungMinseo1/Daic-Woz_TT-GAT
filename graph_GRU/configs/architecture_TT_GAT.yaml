@@ -1,0 +1,25 @@
+training:
+  lr: 0.00003
+  weight-decay: 0.00042
+  bs: 4
+  scheduler: 'reducelr'
+  warmup_epoch: 5
+  focal_alpha: 0.75
+  focal_gamma: 3
+  gamma: 0.5
+  step-size: 50
+  embed_model: 'sentence-transformers/all-MiniLM-L6-v2'
+  time_interval: 10
+
+model:
+  h_dim: 256
+  head: 4
+  num_layers: 3
+  gru_num_layers: 2
+  t_dropout: 0.25
+  g_dropout: 0.25
+  v_dropout: 0.35
+  a_dropout: 0.4
+  use_attention: True
+  use_summary_node: True
+  use_text_proj: False
