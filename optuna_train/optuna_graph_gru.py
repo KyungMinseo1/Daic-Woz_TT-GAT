@@ -20,12 +20,14 @@ from graph_GRU._multimodal_model_gru.GAT import GATClassifier as GRUGAT, GATJKCl
 from graph_GRU._multimodal_model_no_gru.GAT import GATClassifier as NoGRUGAT, GATJKClassifier as NoGRUV2GAT
 from graph_GRU._bimodal_model_gru.GAT import GATClassifier as BiGAT, GATJKClassifier as BiV2GAT
 
-from graph_GRU.multimodal_gru.dataset import make_graph as GRU_make_graph
-from graph_GRU.multimodal_proxy.dataset import make_graph as Proxy_make_graph
-from graph_GRU.multimodal_topic_gru.dataset import make_graph as TopicGRU_make_graph
-from graph_GRU.multimodal_topic_gru_proxy.dataset import make_graph as TopicProxyGRU_make_graph
-from graph_GRU.multimodal_topic_proxy.dataset import make_graph as TopicProxy_make_graph
-from graph_GRU.bimodal_topic_gru_proxy.dataset import make_graph as BiTopicProxy_make_graph
+from graph_GRU.graph_construct import GraphConfig
+
+from graph_GRU.multimodal_gru.dataset import GRU_GC
+from graph_GRU.multimodal_proxy.dataset import Proxy_GC
+from graph_GRU.multimodal_topic_gru.dataset import TopicGRU_GC
+from graph_GRU.multimodal_topic_gru_proxy.dataset import TopicProxyGRU_GC
+from graph_GRU.multimodal_topic_proxy.dataset import TopicProxy_GC
+from graph_GRU.bimodal_topic_gru_proxy.dataset import BiTopicProxyGRU_GC
 
 from graph.train_val import train_gat, validation_gat, FocalLoss, check_gru_grad
 
@@ -56,12 +58,12 @@ V2_MODEL = {
 
 
 MAKE_GRAPH = {
-  'multimodal_gru':GRU_make_graph,
-  'multimodal_proxy':Proxy_make_graph,
-  'multimodal_topic_gru':TopicGRU_make_graph,
-  'multimodal_topic_gru_proxy':TopicProxyGRU_make_graph,
-  'multimodal_topic_proxy':TopicProxy_make_graph,
-  'bimodal_topic_gru_proxy':BiTopicProxy_make_graph
+  'multimodal_gru':GRU_GC(),
+  'multimodal_proxy':Proxy_GC(),
+  'multimodal_topic_gru':TopicGRU_GC(),
+  'multimodal_topic_gru_proxy':TopicProxyGRU_GC(),
+  'multimodal_topic_proxy':TopicProxy_GC(),
+  'bimodal_topic_gru_proxy':BiTopicProxyGRU_GC()
 }
 
 def gru_objective(
@@ -245,8 +247,10 @@ def gru_objective(
         num_classes=2
       )
 
-      check_gru_grad(model.vision_gru, "Vision GRU")
-      check_gru_grad(model.audio_gru, "Audio GRU")
+      if hasattr(model, 'vision_gru'):
+        check_gru_grad(model.vision_gru, "Vision GRU")
+      if hasattr(model, 'audio_gru'):
+        check_gru_grad(model.audio_gru, "Audio GRU")
       logger.info(f"Epoch {epoch}: F1 {val_f1}")
 
       trial.report(val_f1, epoch)
@@ -579,31 +583,27 @@ def main():
   test_id = test_df.Participant_ID.tolist()
   test_label = test_df.PHQ_Binary.tolist()
 
-  make_graph = MAKE_GRAPH
+  graph_config = GraphConfig(
+    model_name=config['training']['embed_model'],
+    time_interval=config['training']['time_interval'],
+    use_summary_node=opt.use_summary,
+    t_t_connect=opt.tt_connect,
+    colab_path=opt.colab_path
+  )
 
   if 'multimodal' in opt.mode:
     logger.info(f"Processing Train Data (Mode: {opt.mode})")
-    train_graphs, dim_list = make_graph[opt.mode](
+    train_graphs, dim_list = MAKE_GRAPH[opt.mode].make_graph(
       ids = train_id+val_id,
       labels = train_label+val_label,
-      time_interval=config['training']['time_interval'],
-      model_name = config['training']['embed_model'],
-      colab_path = opt.colab_path,
-      use_summary_node = opt.use_summary,
-      t_t_connect=opt.tt_connect,
-      v_a_connect=False
+      config = graph_config
     )
 
     logger.info(f"Processing Validation Data (Mode: {opt.mode})")
-    val_graphs, _ = make_graph[opt.mode](
+    val_graphs, _ = MAKE_GRAPH[opt.mode].make_graph(
       ids = test_id,
       labels = test_label,
-      time_interval=config['training']['time_interval'],
-      model_name = config['training']['embed_model'],
-      colab_path = opt.colab_path,
-      use_summary_node = opt.use_summary,
-      t_t_connect=opt.tt_connect,
-      v_a_connect=False
+      config = graph_config
     )
 
     t_dim = dim_list[0]
@@ -613,25 +613,17 @@ def main():
   else:
     logger.info(f"Processing Train Data (Mode: {opt.mode})")
 
-    train_graphs, dim_list = make_graph[opt.mode](
+    train_graphs, dim_list = MAKE_GRAPH[opt.mode].make_graph(
       ids = train_id+val_id,
       labels = train_label+val_label,
-      time_interval=config['training']['time_interval'],
-      model_name = config['training']['embed_model'],
-      colab_path = opt.colab_path,
-      use_summary_node = opt.use_summary,
-      t_t_connect=opt.tt_connect
+      config = graph_config
     )
 
     logger.info(f"Processing Validation Data (Mode: {opt.mode})")
-    val_graphs, _ = make_graph[opt.mode](
+    val_graphs, _ = MAKE_GRAPH[opt.mode].make_graph(
       ids = test_id,
       labels = test_label,
-      time_interval=config['training']['time_interval'],
-      model_name = config['training']['embed_model'],
-      colab_path = opt.colab_path,
-      use_summary_node = opt.use_summary,
-      t_t_connect=opt.tt_connect
+      config = graph_config
     )
 
     if 'bimodal' in opt.mode:
