@@ -3,19 +3,21 @@ import os, sys
 from .. import path_config
 import pandas as pd
 import numpy as np
-import torch
+
 from tqdm import tqdm
 from loguru import logger
+
+import torch
 from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
-from .._multimodal_model_no_gru.GAT import GATClassifier
+
+from ..graph_construct import Graph_Constructor, GraphConfig
+from .._multimodal_model_no_gru.GAT import GATClassifier, GATJKClassifier
+
 import matplotlib.pyplot as plt
 from torch_geometric.utils import to_networkx
 import matplotlib.patches as mpatches
 import networkx as nx
-from sklearn.preprocessing import StandardScaler, RobustScaler
-
-from ..preprocessing import process_transcription, process_audio, process_vision
 
 plt.rcParams['font.family'] ='Malgun Gothic'
 plt.rcParams['axes.unicode_minus'] =False
@@ -27,283 +29,191 @@ logger.add(
   format="<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | <level>{message}</level>",
 )
 
-kor_to_eng_dict = {
-  "심리 상태 및 감정": "Psychological State and Emotional Well-being", 
-  "개인 특성 및 경험": "Personal Traits and Life Experiences",
-  "생활 환경 및 취미": "Living Conditions and Lifestyle Interests",
-  "경력, 교육 및 군 복무": "Career, Education, and Military Service History",
-  "대인 관계 및 가족": "Interpersonal Relationships and Family Dynamics"
-}
-
 # Topic Deleted -> Text to Text connection is activated
-def make_graph(
-    ids,
-    labels,
-    model_name,
-    time_interval,
-    colab_path=None,
-    use_summary_node=True,
-    t_t_connect=True,
-    v_a_connect=False,
-    visualization=False,
-    explanation=False
+class Proxy_GC(Graph_Constructor):
+  def make_graph(
+      self,
+      ids : list,
+      labels : list,
+      config : GraphConfig
   ):
-  """
-  make_graph's Docstring
-  
-  :param ids: List of patient ids
-  :param labels: List of depression labels
-  :param model_name: Language model name(HuggingFace)
-  :param time_interval: Time interval for seperating node (unit: second)
-  :param colab_path: Write your colab dataset path if you're using colab
-  :param use_summary_node: Whether you want to use summary node (else, the model will do pooling with topic nodes)
-  :param t_t_connect: Whether you want to connect text to text nodes regarding their temporal relationship
-  :param v_a_connect: Whether you want to connect vision to audio (or audio to vision) for aligning two multimodalities
-  :param visualization: Whether you want to visualize the graph construction (for a simple image, data is partially sampled)
-  :param explanation: Whether you want to use GNNExplainer or analyze specifically on the model
-  """
-  try:
-    finish_utterance = ["asked everything", "asked_everything", "it was great chatting with you"]
-    EXCLUDED_SESSIONS = ['342', '394', '398', '460']
-    INTERRUPTED_SESSIONS = ['373', '444']
-    NO_ALLIE = ['458', '451', '480']
-    blacklist = EXCLUDED_SESSIONS + INTERRUPTED_SESSIONS + NO_ALLIE
+    try:
+      config.t_t_connect = True
 
-    filtered_data = [(id, label) for id, label in zip(ids, labels) if str(id) not in blacklist]
-    if len(filtered_data) < len(ids):
-      logger.warning(f"Filtered out {len(ids) - len(filtered_data)} sessions from blacklist")
+      filtered_ids, filtered_labels = self.filter_data(ids, labels)
 
-    filtered_ids, filtered_labels = zip(*filtered_data) if filtered_data else ([], [])
+      logger.info("Getting your model")
+      language_model = SentenceTransformer(config.model_name)
+      logger.info("Model loaded")
 
-    logger.info("Getting your model")
-    model = SentenceTransformer(model_name)
-    logger.info("Model loaded")
-    
-    graphs = []
-    
-    # v_scaler = StandardScaler()
-    # a_scaler = StandardScaler()
-    # v_scaler = RobustScaler()
-    # a_scaler = RobustScaler()
+      graphs = []
 
-    logger.info("Switching CSV into Graphs")
-    
-    if colab_path is not None:
-      logger.info(f"Using Colab Path: {colab_path}")
+      # v_scaler = StandardScaler()
+      # a_scaler = StandardScaler()
+      # v_scaler = RobustScaler()
+      # a_scaler = RobustScaler()
 
-    for graph_idx, id in tqdm(enumerate(filtered_ids), desc="Dataframe -> Graph", total=len(filtered_ids)):
-      if colab_path is not None:
-        df = pd.read_csv(os.path.join(colab_path, 'Transcription Topic 2', f"{id}_transcript_topic.csv"))
-        v_df = pd.read_csv(os.path.join(colab_path, 'Vision Summary', f"{id}_vision_summary.csv"))
-        a_df = pd.read_csv(os.path.join(colab_path, 'Audio Summary', f"{id}_audio_summary.csv"))
-        
+      logger.info("Switching CSV into Graphs")
+
+      if config.colab_path is not None:
+        logger.info(f"Using Colab Path: {config.colab_path}")
+
+      for graph_idx, id_ in tqdm(enumerate(filtered_ids), desc="Dataframe -> Graph", total=len(filtered_ids)):
+        try:
+          vision_df, audio_df, utterances, topics, start_stop_list, start_stop_list_ellie = \
+            self.prepare_df(
+              id_ = id_,
+              time_interval = config.time_interval,
+              colab_path = config.colab_path
+            )
+
+          # Static Nodes (X)
+          summary_node = []
+          topic_nodes = []
+          transcription_list = []
+          proxy_list = []
+
+          # Non Static (Vision/Audio) Nodes
+          vision_pooled_list = []  # Vision Average Pooling
+          audio_pooled_list = []  # Audio Average Pooling
+
+          # X_type
+          node_types = []
+
+          # edges
+          source_nodes = []
+          target_nodes = []
+
+          # Initialize node index
+          current_node_idx = 0
+
+          # Previous text node for temporal connection
+          global_prev_t_node_id = None
+
+          if config.visualization:
+            utterances = utterances[::8]
+            logger.info(f"TOTAL NUMBER OF DATA: {len(utterances)}")
+            start_stop_list = start_stop_list[::8]
+
+          # Embedding text transcriptions
+          t_embeds = language_model.encode(utterances)
+
+          if config.use_summary_node:
+            node_types.append('summary')
+            summary_node = list(np.average(t_embeds, axis=0).reshape(1, -1))
+            start_offset = 1
+          else:
+            start_offset = 0
+
+          # Initialize node index
+          current_node_idx = start_offset
+
+          for t_emb, (start, stop) in zip(t_embeds, start_stop_list):
+
+            # Text & Proxy Nodes
+            transcription_list, p_node_id, node_types, current_node_idx, source_nodes, target_nodes, global_prev_t_node_id = \
+              Graph_Constructor.Text_node_wo_Topic(
+                t_emb=t_emb,
+                transcription_list=transcription_list,
+                proxy_list=proxy_list,
+                node_types=node_types,
+                source_nodes=source_nodes,
+                target_nodes=target_nodes,
+                current_node_idx=current_node_idx,
+                global_prev_t_node_id=global_prev_t_node_id,
+                t_t_connect=config.t_t_connect,
+                use_summary_node=config.use_summary_node
+              )
+
+            # Vision & Audio Nodes
+            vision_pooled_list, v_node_id, current_node_idx, source_nodes, target_nodes = \
+              Graph_Constructor.V_node_P(
+                vision_df = vision_df,
+                vision_pooled_list = vision_pooled_list,
+                node_types = node_types,
+                source_nodes = source_nodes,
+                target_nodes = target_nodes,
+                current_node_idx = current_node_idx,
+                target_node_id = p_node_id,
+                start = start,
+                stop = stop,
+              )
+            audio_pooled_list, a_node_id, current_node_idx, source_nodes, target_nodes = \
+              Graph_Constructor.A_node_P(
+                audio_df = audio_df,
+                audio_pooled_list = audio_pooled_list,
+                node_types = node_types,
+                source_nodes = source_nodes,
+                target_nodes = target_nodes,
+                current_node_idx = current_node_idx,
+                target_node_id = p_node_id,
+                start = start,
+                stop = stop,
+              )
+
+            if (v_node_id and a_node_id) and v_node_id == a_node_id - 1 and config.v_a_connect:
+              source_nodes.append(v_node_id)
+              target_nodes.append(a_node_id)
+              source_nodes.append(a_node_id)
+              target_nodes.append(v_node_id)
+
+          x, text_dim = Graph_Constructor.concat_features(
+            transcription_list = transcription_list,
+            node_types = node_types,
+            summary_node = summary_node,
+            topic_nodes = topic_nodes,
+            proxy_list = proxy_list
+          )
+
+          vision_dim = len(vision_df.columns) - 1
+          audio_dim = len(audio_df.columns) - 1
+
+          x_vision = \
+            Graph_Constructor.V_to_X_P(
+              vision_pooled_list=vision_pooled_list,
+              vision_dim=vision_dim
+            )
+          x_audio = \
+            Graph_Constructor.A_to_X_P(
+              audio_pooled_list=audio_pooled_list,
+              audio_dim=audio_dim
+            )
+
+          edge_index = torch.tensor([source_nodes, target_nodes], dtype=torch.long)
+          y = torch.tensor([filtered_labels[graph_idx]], dtype=torch.long)
+
+          data = Data(x=x, edge_index=edge_index, y=y, node_types=node_types)
+          data.x_vision = x_vision
+          data.x_audio = x_audio
+
+          if config.visualization:
+            logger.info(f"X_Vision: {data.x_vision.shape}")
+            logger.info(f"X_Audio: {data.x_audio.shape}")
+
+          graphs.append(data)
+
+        except Exception as e:
+          logger.error(f"Index: {graph_idx}, Id: {id_}, Error: {e}")
+          import traceback; traceback.print_exc()
+
+      if len(graphs) > 0:
+        v_dim = graphs[0].x_vision.shape[-1]
+        a_dim = graphs[0].x_audio.shape[-1]
       else:
-        df = pd.read_csv(os.path.join(path_config.DATA_DIR, 'Transcription Topic 2', f"{id}_transcript_topic.csv"))
-        v_df = pd.read_csv(os.path.join(path_config.DATA_DIR, 'Vision Summary', f"{id}_vision_summary.csv"))
-        a_df = pd.read_csv(os.path.join(path_config.DATA_DIR, 'Audio Summary', f"{id}_audio_summary.csv"))
-    
-      try:
-        utterances = []
-        start_stop_list = []
-        
-        df.topic = df.topic.ffill()
-        df = df.reset_index()
-        search_pattern = '|'.join(finish_utterance)
-        condition = df['value'].str.contains(search_pattern, na=False)
-        terminate_index = df.index[condition]
-        if not terminate_index.empty:
-          df = df.iloc[:terminate_index.values[0]]
-        
-        utterances, topics, start_stop_list, start_stop_list_ellie = process_transcription(df, time_interval)
+        v_dim = 0
+        a_dim = 0
 
-        # Vision Scaling
-        vision_df = process_vision(v_df, start_stop_list_ellie)
-        vision_df = vision_df.replace([np.inf, -np.inf], np.nan).fillna(0)      
-        # vision_timestamps = vision_df['timestamp'].values
-        # vision_df = vision_df.drop(columns=['timestamp'])
-        # vision_scaled = v_scaler.fit_transform(vision_df.values)
-        # vision_df = pd.DataFrame(vision_scaled, columns=vision_df.columns)
-        # vision_df['timestamp'] = vision_timestamps
+      if config.explanation:
+        return graphs, (text_dim, v_dim, a_dim), (utterances)
+      else:
+        return graphs, (text_dim, v_dim, a_dim)
 
-        # Audio Scaling
-        audio_df = process_audio(a_df, start_stop_list_ellie)
-        audio_df = audio_df.replace([np.inf, -np.inf], np.nan).fillna(0)
-
-        if audio_df.shape[1] == 0:
-          logger.warning("No audio features found! Adding a dummy feature.")
-          audio_df['dummy_audio'] = 0.0
-        # elif audio_df.shape[1] > 0:
-          # audio_values = a_scaler.fit_transform(audio_df.values)
-          # audio_df = pd.DataFrame(audio_values, columns=audio_df.columns)
-
-        transcription_list = []
-        proxy_list = []
-
-        vision_pooled_list = []
-        audio_pooled_list = []
-
-        node_types = []
-        if use_summary_node:
-          node_types.append('summary')
-
-        start_offset = 1 if use_summary_node else 0
-        current_node_idx = start_offset
-
-        source_nodes = []
-        target_nodes = []
-
-        global_prev_t_node_id = None
-        # Text
-        if visualization:
-          utterances = utterances[::5]
-          start_stop_list = start_stop_list[::5]
-
-        t_embeds = model.encode(utterances)
-
-        if use_summary_node:
-          summary_node = np.average(t_embeds, axis=0).reshape(1, -1)
-
-        for t_emb, (start, stop) in zip(t_embeds, start_stop_list):
-
-          # Text Node
-          transcription_list.append(t_emb)
-          t_node_id = current_node_idx
-          node_types.append('transcription')
-          current_node_idx += 1
-
-          # Proxy Node
-          proxy_list.append(t_emb) 
-          p_node_id = current_node_idx
-          node_types.append('proxy')
-          current_node_idx += 1
-
-          # Text -> Summary
-          source_nodes.append(t_node_id)
-          target_nodes.append(0)
-
-          # Text -> Text
-          if global_prev_t_node_id is not None and t_t_connect:
-            source_nodes.append(global_prev_t_node_id)
-            target_nodes.append(t_node_id)
-            source_nodes.append(t_node_id)
-            target_nodes.append(global_prev_t_node_id)
-
-          global_prev_t_node_id = t_node_id
-
-          # Proxy -> Text
-          source_nodes.append(p_node_id)
-          target_nodes.append(t_node_id)
-
-          # Vision Node
-          v_seq = vision_df.loc[(start <= vision_df['timestamp']) & (vision_df['timestamp'] <= stop)]
-          v_target = v_seq.drop(columns=['timestamp']).values
-          
-          if len(v_target) > 0:
-            v_pooled = np.mean(v_target, axis=0) # [Dim,]
-            vision_pooled_list.append(v_pooled)
-
-            v_node_id = current_node_idx
-            node_types.append('vision')
-            current_node_idx += 1
-
-            # Vision -> Proxy
-            source_nodes.append(v_node_id)
-            target_nodes.append(p_node_id)
-
-          # Audio Node
-          start_idx = int(start*100)
-          stop_idx = int(stop*100) + 1
-          a_seq = audio_df[(start_idx <= audio_df['index']) & (audio_df['index'] <= stop_idx)]
-          a_target = a_seq.drop(['index'], axis=1).values
-
-          if len(a_target)>0:
-            a_pooled = np.mean(a_target, axis=0) # [Dim,]
-            audio_pooled_list.append(a_pooled)
-
-            a_node_id = current_node_idx
-            node_types.append('audio')
-            current_node_idx += 1
-
-            # Audio -> Proxy
-            source_nodes.append(a_node_id)
-            target_nodes.append(p_node_id)
-          
-          if (v_node_id and a_node_id) and v_node_id == a_node_id-1 and v_a_connect:
-            source_nodes.append(v_node_id)
-            target_nodes.append(a_node_id)
-            source_nodes.append(a_node_id)
-            target_nodes.append(v_node_id)
-    
-        # Static features (Summary, Topic, Text)
-        feature_parts = []
-        if use_summary_node:
-          feature_parts.append(summary_node)
-        feature_parts.append(np.array(transcription_list))
-        feature_parts.append(np.array(proxy_list))
-
-        static_features = np.concatenate(feature_parts, axis=0)
-        text_dim = static_features.shape[1]
-
-        # total x tensor -> initiation
-        total_num_nodes = len(node_types)
-        x = torch.zeros((total_num_nodes, text_dim), dtype=torch.float)
-
-        # fill static features
-        text_indices = [i for i, nt in enumerate(node_types) if nt not in ['vision', 'audio']]
-        x[text_indices] = torch.tensor(static_features, dtype=torch.float)
-        
-        # Vision/Audio 노드를 1.0으로 초기화 (GNNExplainer를 위한 스위치 역할)
-        vision_indices = [i for i, nt in enumerate(node_types) if nt == 'vision']
-        audio_indices = [i for i, nt in enumerate(node_types) if nt == 'audio']
-
-        if vision_indices:
-          x[vision_indices] = 1.0
-        if audio_indices:
-          x[audio_indices] = 1.0
-
-        # Vision
-        if len(vision_pooled_list) > 0:
-          x_vision = torch.tensor(np.array(vision_pooled_list), dtype=torch.float)
-        else:
-          x_vision = torch.empty((0, len(vision_df.columns)-1)) # Dummy dim
-
-        # Audio
-        if len(audio_pooled_list) > 0:
-          x_audio = torch.tensor(np.array(audio_pooled_list), dtype=torch.float)
-        else:
-          x_audio = torch.empty((0, len(audio_df.columns)-1))
-
-        edge_index = torch.tensor([source_nodes, target_nodes], dtype=torch.long)
-        y = torch.tensor([filtered_labels[graph_idx]], dtype=torch.long)
-
-        data = Data(x=x, edge_index=edge_index, y=y, node_types=node_types)
-        data.x_vision = x_vision
-        data.x_audio = x_audio
-
-        graphs.append(data)
-
-      except Exception as e:
-        logger.error(f"Index:{graph_idx}: {e}")
-        import traceback; traceback.print_exc()
-
-    if len(graphs) > 0:
-      v_dim = graphs[0].x_vision.shape[-1]
-      a_dim = graphs[0].x_audio.shape[-1]
-    else:
-      v_dim = 0
-      a_dim = 0
-
-    if explanation:
-      return graphs, (text_dim, v_dim, a_dim), (utterances)
-    else:
-      return graphs, (text_dim, v_dim, a_dim)
-  
-  except Exception as e:
-    logger.error(e)
-    if explanation:
-      return [], (0, 0, 0), (None)
-    else:
-      return [], (0, 0, 0)
+    except Exception as e:
+      logger.error(e)
+      if config.explanation:
+        return [], (0, 0, 0), (None)
+      else:
+        return [], (0, 0, 0)
 
 if __name__=="__main__":
   # train_df = pd.read_csv(os.path.join(path_config.DATA_DIR, 'train_split_Depression_AVEC2017.csv'))
@@ -323,14 +233,20 @@ if __name__=="__main__":
   logger.info(f"Labels distribution: {pd.Series(train_label).value_counts().to_dict()}")
   logger.info("-" * 50)
 
-  train_graphs, (t_dim, v_dim, a_dim) = make_graph(
-    ids = train_id,
-    labels = train_label,
-    time_interval=10,
+  graph_config = GraphConfig(
     model_name='sentence-transformers/all-MiniLM-L6-v2',
-    use_summary_node=True,
+    time_interval=5,
+    use_summary_node=False,
     v_a_connect=False,
-    visualization=True)
+    visualization=True
+  )
+  gc = Proxy_GC()
+
+  train_graphs, (t_dim, v_dim, a_dim) = gc.make_graph(
+    ids=train_id,
+    labels=train_label,
+    config=graph_config
+  )
   logger.info(f"Transcription dim: {t_dim}")
   logger.info(f"Vision dim: {v_dim}")
   logger.info(f"Audio dim: {a_dim}")
