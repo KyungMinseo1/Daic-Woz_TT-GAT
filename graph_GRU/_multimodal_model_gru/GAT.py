@@ -259,10 +259,12 @@ class GATClassifier(nn.Module):
         """
         Args:
             data: PyG Data 객체
-                - data.x: 노드 피처
-                - data.edge_index: 엣지 인덱스
-                - data.batch: 배치 정보
-                - data.node_types: 노드 타입 리스트 (len = num_nodes)
+                data.x: 노드 피처
+                data.edge_index: 엣지 인덱스
+                data.batch: 배치 정보
+                data.node_types: 노드 타입 리스트 (len = num_nodes)
+            explanation : bool
+                Used for precise decomposition of model's output
         """
         x, edge_index, batch = data.x, data.edge_index, data.batch
         x_vision = data.x_vision    # (N_vision, seq_len, v_dim)
@@ -508,10 +510,12 @@ class GATJKClassifier(nn.Module):
         """
         Args:
             data: PyG Data 객체
-                - data.x: 노드 피처
-                - data.edge_index: 엣지 인덱스
-                - data.batch: 배치 정보
-                - data.node_types: 노드 타입 리스트 (len = num_nodes)
+                data.x: 노드 피처
+                data.edge_index: 엣지 인덱스
+                data.batch: 배치 정보
+                data.node_types: 노드 타입 리스트 (len = num_nodes)
+            explanation : bool
+                Used for precise decomposition of model's output
         """
         x, edge_index, batch = data.x, data.edge_index, data.batch
         x_vision = data.x_vision    # (N_vision, seq_len, v_dim)
