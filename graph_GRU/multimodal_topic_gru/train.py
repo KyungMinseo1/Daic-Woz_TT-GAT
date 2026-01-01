@@ -9,7 +9,8 @@ from torch_geometric.loader import DataLoader
 from collections import Counter
 
 from .._multimodal_model_gru.GAT import GATClassifier, GATJKClassifier
-from .dataset import make_graph
+from ..graph_construct import GraphConfig
+from .dataset import TopicGRU_GC
 
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning) 
@@ -79,22 +80,25 @@ def main():
   test_label = test_df.PHQ_Binary.tolist()
 
   logger.info("Processing Train Data")
-  train_graphs, (t_dim, v_dim, a_dim) = make_graph(
-    ids = train_id+val_id,
-    labels = train_label+val_label,
+  graph_config = GraphConfig(
+    model_name=config['training']['embed_model'],
     time_interval=config['training']['time_interval'],
-    model_name = config['training']['embed_model'],
-    colab_path = opt.colab_path,
-    use_summary_node = config['model']['use_summary_node']
+    use_summary_node=config['model']['use_summary_node'],
+    colab_path=opt.colab_path
+  )
+
+  gc = TopicGRU_GC()
+
+  train_graphs, (t_dim, v_dim, a_dim) = gc.make_graph(
+    ids=train_id + val_id,
+    labels=train_label + val_label,
+    config=graph_config
   )
   logger.info("Processing Validation Data")
-  val_graphs, (_, _, _) = make_graph(
-    ids = test_id,
-    labels = test_label,
-    time_interval=config['training']['time_interval'],
-    model_name = config['training']['embed_model'],
-    colab_path = opt.colab_path,
-  	use_summary_node = config['model']['use_summary_node']
+  val_graphs, (_, _, _) = gc.make_graph(
+    ids=test_id,
+    labels=test_label,
+    config=graph_config
   )
 
   logger.info("__TRAINING_STATS__")
