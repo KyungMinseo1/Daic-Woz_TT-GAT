@@ -72,7 +72,7 @@ class AttentionGRU(nn.Module):
         """
         self.gru.flatten_parameters()
         packed = pack_padded_sequence(x, lengths.cpu(), batch_first=True, enforce_sorted=False)
-        packed_out, (h_n, c_n) = self.gru(packed)
+        packed_out, h_n = self.gru(packed)
 
         # output shape: (B, seq_len, hidden)
         gru_output, _ = pad_packed_sequence(packed_out, batch_first=True)
@@ -117,7 +117,7 @@ class SimpleGRU(nn.Module):
         """
         self.gru.flatten_parameters()
         packed = pack_padded_sequence(x, lengths.cpu(), batch_first=True, enforce_sorted=False)
-        packed_out, (h_n, c_n) = self.gru(packed)
+        packed_out, h_n = self.gru(packed)
 
         h_final = h_n[-1]
 
@@ -127,19 +127,20 @@ class SimpleGRU(nn.Module):
 
 class GATClassifier(nn.Module):
     def __init__(
-            self,
-            text_dim,
-            vision_dim,
-            audio_dim,
-            hidden_channels,
-            num_layers,
-            gru_num_layers,
-            num_classes,
-            dropout_dict,
-            heads=8,
-            use_attention=False,
-            use_summary_node=True,
-            use_text_proj=True):
+        self,
+        text_dim: int,
+        vision_dim: int,
+        audio_dim: int,
+        hidden_channels: int,
+        num_layers: int,
+        gru_num_layers: int,
+        num_classes: int,
+        dropout_dict: dict,
+        heads: int = 8,
+        use_attention: bool = False,
+        use_summary_node: bool = True,
+        use_text_proj: bool = True
+    ):
         """
         Args:
             text_dim: 텍스트 임베딩 차원 (summary, transcription)
@@ -150,14 +151,14 @@ class GATClassifier(nn.Module):
             gru_num_layers: GRU 레이어 수
             num_classes: 분류 클래스 수
             heads: attention head 수
-            dropout: dropout 비율
+            dropout_dict: dropout 비율 dictionary
             use_attention: AttentionLSTM 사용 여부
             use_summary_node: Summary Node 사용 여부
             use_text_proj: Transcription Projection layer 사용 여부
         """
         super().__init__()
         
-        assert 2 <= num_layers and num_layers <= 4, logger.error("Number of Layers should be set between 2 and 4")
+        assert 2 <= num_layers <= 4, logger.error("Number of Layers should be set between 2 and 4")
         
         self.dropout_t = dropout_dict.get('text_dropout', 0.1)
         self.dropout_g = dropout_dict.get('graph_dropout', 0.1)
@@ -169,10 +170,10 @@ class GATClassifier(nn.Module):
         self.use_summary_node = use_summary_node
         self.use_text_proj = use_text_proj
 
-        self.norm1 = nn.LayerNorm(hidden_channels * heads)
-        self.norm2 = nn.LayerNorm(hidden_channels * heads)
-        self.norm3 = nn.LayerNorm(hidden_channels * heads)
-        self.norm4 = nn.LayerNorm(hidden_channels)
+        self.norm1 = GraphNorm(hidden_channels * heads)
+        self.norm2 = GraphNorm(hidden_channels * heads)
+        self.norm3 = GraphNorm(hidden_channels * heads)
+        self.norm4 = GraphNorm(hidden_channels)
 
         # Vision GRU
         if self.use_attention:
@@ -250,10 +251,9 @@ class GATClassifier(nn.Module):
         self.conv1.reset_parameters()
         self.conv2.reset_parameters()
         self.conv3.reset_parameters()
-        
+        self.conv4.reset_parameters()
+
         nn.init.xavier_uniform_(self.lin.weight, gain=0.01)
-        if self.lin.bias is not None:
-            nn.init.zeros_(self.lin.bias)
 
     def forward(self, data, explanation=False):
         """
@@ -298,7 +298,7 @@ class GATClassifier(nn.Module):
 
         # Audio
         if x_audio.size(0) > 0 and len(audio_indices) > 0:
-            h_audio, _ = self.vision_gru(x_audio, audio_lengths)
+            h_audio, _ = self.audio_gru(x_audio, audio_lengths)
             if len(audio_indices) == h_audio.size(0):
                 mask_weight = x[audio_indices].mean(dim=1, keepdim=True)
                 weighted_audio = h_audio.to(final_x.dtype) * mask_weight.to(final_x.dtype)
@@ -307,27 +307,23 @@ class GATClassifier(nn.Module):
         # GAT 레이어 1
         x = F.dropout(final_x, p=self.dropout_g, training=self.training)
         x = self.conv1(x, edge_index)
-        x = self.norm1(x)
+        x = self.norm1(x, batch)
         x = F.elu(x)
-		        
-        if self.num_layers == 2:
-          pass
-        else:
-          # GAT 레이어 2
-          x_in = x
-          x = F.dropout(x, p=self.dropout_g, training=self.training)
-          x = self.conv2(x, edge_index)
-          x = self.norm2(x + x_in)
-          x = F.elu(x)
-          
-          if self.num_layers == 3:
-            pass
-          else:
+
+        if self.num_layers >= 3:
+            # GAT 레이어 2
+            x_in = x
+            x = F.dropout(x, p=self.dropout_g, training=self.training)
+            x = self.conv2(x, edge_index)
+            x = self.norm2(x + x_in, batch)
+            x = F.elu(x)
+
+        if self.num_layers >= 4:
             # GAT 레이어 3
             x_in = x
             x = F.dropout(x, p=self.dropout_g, training=self.training)
             x = self.conv3(x, edge_index)
-            x = self.norm3(x + x_in)
+            x = self.norm3(x + x_in, batch)
             x = F.elu(x)
         
         # GAT 레이어 4
@@ -347,14 +343,18 @@ class GATClassifier(nn.Module):
           out = F.dropout(summary_nodes, p=self.dropout_g, training=self.training)
           
         else:
-          # Summary node가 할당되지 않았다고 가정
-          # Topic node의 global pool 진행
-          topic_indices = [i for i, t in enumerate(flat_node_types) if t == 'topic']
-          topic_x = x[topic_indices]
-          topic_batch = batch[topic_indices]
-          topic_nodes = global_mean_pool(topic_x, topic_batch)
-          out = F.dropout(topic_nodes, p=self.dropout_g, training=self.training)
-          
+            # Summary node가 할당되지 않았다고 가정
+            # Topic node의 global pool 진행
+            topic_indices = [i for i, t in enumerate(flat_node_types) if t == 'topic']
+            topic_x = x[topic_indices]
+            topic_batch = batch[topic_indices]
+            if len(topic_x) > 0:
+                topic_nodes = global_mean_pool(topic_x, topic_batch)
+                out = F.dropout(topic_nodes, p=self.dropout_g, training=self.training)
+            else:
+                out = global_mean_pool(x, batch)
+                out = F.dropout(out, p=self.dropout_g, training=self.training)
+
         out = self.lin(out)
         if self.num_classes == 2:
             out = out.squeeze(-1)
@@ -365,19 +365,20 @@ class GATClassifier(nn.Module):
     
 class GATJKClassifier(nn.Module):
     def __init__(
-            self,
-            text_dim,
-            vision_dim,
-            audio_dim,
-            hidden_channels,
-            num_layers,
-            gru_num_layers,
-            num_classes,
-            dropout_dict,
-            heads=8,
-            use_attention=False,
-            use_summary_node=True,
-            use_text_proj=True):
+        self,
+        text_dim: int,
+        vision_dim: int,
+        audio_dim: int,
+        hidden_channels: int,
+        num_layers: int,
+        gru_num_layers: int,
+        num_classes: int,
+        dropout_dict: dict,
+        heads: int = 8,
+        use_attention: bool = False,
+        use_summary_node: bool = True,
+        use_text_proj: bool = True
+    ):
         """
         Args:
             text_dim: 텍스트 임베딩 차원 (summary, transcription)
@@ -388,14 +389,14 @@ class GATJKClassifier(nn.Module):
             gru_num_layers: GRU 레이어 수
             num_classes: 분류 클래스 수
             heads: attention head 수
-            dropout: dropout 비율
+            dropout_dict: dropout 비율 dictionary
             use_attention: AttentionLSTM 사용 여부
             use_summary_node: Summary Node 사용 여부
             use_text_proj: Transcription Projection layer 사용 여부
         """
         super().__init__()
         
-        assert 2 <= num_layers and num_layers <= 4, logger.error("Number of Layers should be set between 2 and 4")
+        assert 2 <= num_layers <= 4, logger.error("Number of Layers should be set between 2 and 4")
         
         self.dropout_t = dropout_dict.get('text_dropout', 0.1)
         self.dropout_g = dropout_dict.get('graph_dropout', 0.1)
