@@ -65,7 +65,7 @@ class Graph_Constructor(ABC):
     self.MAX_SEQ_LEN_AUDIO = None
 
   def filter_data(self, ids, labels):
-    filtered_data = [(id_, label_) for id_, label_ in zip(ids, labels) if str(id) not in self.blacklist]
+    filtered_data = [(id_, label_) for id_, label_ in zip(ids, labels) if str(id_) not in self.blacklist]
     if len(filtered_data) < len(ids):
       logger.warning(f"Filtered out {len(ids) - len(filtered_data)} sessions from blacklist")
     filtered_ids, filtered_labels = zip(*filtered_data) if filtered_data else ([], [])
