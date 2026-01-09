@@ -1,0 +1,26 @@
+training:
+  lr: 5.581729057290829e-05
+  weight-decay: 0.00023819197561339428
+  optimizer: 'AdamW'
+  bs: 4
+  scheduler: 'reducelr'
+  warmup_epoch: 5
+  focal_alpha: 0.75
+  focal_gamma: 3
+  gamma: 0.5
+  step-size: 50
+  embed_model: 'sentence-transformers/all-MiniLM-L6-v2'
+  time_interval: 10
+
+model:
+  h_dim: 256
+  head: 8
+  num_layers: 4
+  gru_num_layers: 2
+  t_dropout: 0.46905928753621906
+  g_dropout: 0.2524619575070977     # 업데이트됨
+  v_dropout: 0.48267163391962276    # 업데이트됨
+  a_dropout: 0.24131596045716078    # 업데이트됨
+  use_attention: True              # True 유지
+  use_summary_node: True
+  use_text_proj: False             # True -> False로 변경됨
