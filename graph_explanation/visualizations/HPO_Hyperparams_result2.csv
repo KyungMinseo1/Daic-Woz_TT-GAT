@@ -1,7 +1,7 @@
-,lr,optimizer,weight_decay
-Bimodal TT-GAT,1.6804111065805783e-06,MomentumSGD,0.0013244246869046079
-BiLSTM_GAT,1.8073752350553137e-06,MomentumSGD,0.0006989038541788092
-Baseline,1.0389333846210387e-06,MomentumSGD,0.001232297933257915
-TT-GAT,5.581729057290829e-05,AdamW,0.00023819197561339428
-BiLSTM_Topic_GAT,6.6915272905487e-05,AdamW,0.00885649049670215
-Baseline_Topic,8.384884251578408e-05,AdamW,0.0013294179244481292
+,Basic,Summary,Summary & Text-to-Text Connection
+Baseline,"{'lr': 1.0389333846210387e-06, 'optimizer': 'MomentumSGD', 'weight_decay': 0.001232297933257915}",,"{'lr': 4.9530852095432104e-05, 'optimizer': 'MomentumSGD', 'weight_decay': 0.00010878615462525952}"
+Baseline-Topic,"{'lr': 8.384884251578408e-05, 'optimizer': 'AdamW', 'weight_decay': 0.0013294179244481292}","{'lr': 4.525156587760975e-05, 'optimizer': 'MomentumSGD', 'weight_decay': 0.0067826968731216795}","{'lr': 8.289589959218248e-05, 'optimizer': 'AdamW', 'weight_decay': 0.0033288090208867965}"
+GRU-GAT,"{'lr': 1.8073752350553137e-06, 'optimizer': 'MomentumSGD', 'weight_decay': 0.0006989038541788092}",,"{'lr': 5.503103393649648e-05, 'optimizer': 'AdamW', 'weight_decay': 0.0006437132552103509}"
+Topic-GRU-GAT,"{'lr': 6.6915272905487e-05, 'optimizer': 'AdamW', 'weight_decay': 0.00885649049670215}","{'lr': 7.213982467552879e-05, 'optimizer': 'AdamW', 'weight_decay': 0.0025812914014402815}","{'lr': 2.6835166562587612e-05, 'optimizer': 'AdamW', 'weight_decay': 0.0009043140069379922}"
+TT-GAT,"{'lr': 5.581729057290829e-05, 'optimizer': 'AdamW', 'weight_decay': 0.00023819197561339428}","{'lr': 7.962622321159012e-05, 'optimizer': 'Adam', 'weight_decay': 0.0009097973696915119}","{'lr': 8.556542207993616e-05, 'optimizer': 'AdamW', 'weight_decay': 0.0004247426747523813}"
+Bimodal-TT-GAT,"{'lr': 1.6804111065805783e-06, 'optimizer': 'MomentumSGD', 'weight_decay': 0.0013244246869046079}","{'lr': 9.576021336159546e-05, 'optimizer': 'AdamW', 'weight_decay': 0.0067376391563504}","{'lr': 9.867886315655705e-05, 'optimizer': 'AdamW', 'weight_decay': 0.000747741683315349}"
