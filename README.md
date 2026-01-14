@@ -1,6 +1,6 @@
 # Daic-Woz-Temporal-Graph (TT-GAT)
 
-![Python](https://img.shields.io/badge/python-3.11+-blue.svg)
+![Python](https://img.shields.io/badge/python-3.10+-blue.svg)
 ![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-EE4C2C.svg)
 ![GNN](https://img.shields.io/badge/GNN-PyTorch--Geometric-0172B3.svg)
 ![Optuna](https://img.shields.io/badge/Optuna-Hyperparameter--Optimization-4099ff.svg)
