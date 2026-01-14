@@ -1,4 +1,4 @@
-# Daic-Woz-LSTM-Graph
+# Daic-Woz-Temporal-Graph (TT-GAT)
 
 ![Python](https://img.shields.io/badge/python-3.11+-blue.svg)
 ![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-EE4C2C.svg)
