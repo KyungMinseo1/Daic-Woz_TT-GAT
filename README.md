@@ -1,5 +1,12 @@
 # Daic-Woz-LSTM-Graph
 
+![Python](https://img.shields.io/badge/python-3.11+-blue.svg)
+![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-EE4C2C.svg)
+![GNN](https://img.shields.io/badge/GNN-PyTorch--Geometric-0172B3.svg)
+![Optuna](https://img.shields.io/badge/Optuna-Hyperparameter--Optimization-4099ff.svg)
+![LLM](https://img.shields.io/badge/LLM-OpenAI--GPT-412991.svg)
+![Embedding](https://img.shields.io/badge/Embedding-all--MiniLM--L6--v2-green.svg)
+
 Official implementation for multimodal depression detection using BiLSTM/GRU and Graph Neural Networks (GNN) on the DAIC-WOZ dataset.
 
 This project integrates text, audio, and visual features from the [DAIC-WOZ (Distress Analysis Interview Corpus - Wizard of Oz)] dataset. It employs a topic-based graph structure to model the temporal and semantic relationships within clinical interviews.

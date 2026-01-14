@@ -1,5 +1,12 @@
 # Daic-Woz-LSTM-Graph
 
+![Python](https://img.shields.io/badge/python-3.11+-blue.svg)
+![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-EE4C2C.svg)
+![GNN](https://img.shields.io/badge/GNN-PyTorch--Geometric-0172B3.svg)
+![Optuna](https://img.shields.io/badge/Optuna-Hyperparameter--Optimization-4099ff.svg)
+![LLM](https://img.shields.io/badge/LLM-OpenAI--GPT-412991.svg)
+![Embedding](https://img.shields.io/badge/Embedding-all--MiniLM--L6--v2-green.svg)
+
 DAIC-WOZ 데이터셋을 활용하여 BiLSTM/GRU 및 그래프 신경망(GNN) 기반의 멀티모달 우울증 탐지를 구현한 공식 저장소입니다.
 
 본 프로젝트는 [DAIC-WOZ (Distress Analysis Interview Corpus - Wizard of Oz)] 데이터셋의 텍스트, 오디오, 비디오 특징을 통합합니다. 임상 인터뷰 내의 시간적 및 의미론적 관계를 모델링하기 위해 토픽 기반 그래프 구조를 사용합니다.
